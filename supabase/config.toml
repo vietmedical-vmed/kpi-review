@@ -1,0 +1,5 @@
+# Cấu hình cho Supabase CLI (nếu deploy Edge Function bằng CLI).
+# Hàm login phải TẮT xác thực JWT vì người dùng chưa đăng nhập khi gọi nó.
+
+[functions.login]
+verify_jwt = false
