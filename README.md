@@ -110,14 +110,48 @@ git push -u origin main
 
 ---
 
+## Nhập KPI hàng loạt bằng Excel
+
+Trang **Nhập Excel** cho phép tải template, điền nhiều người trong 1 file rồi upload lại.
+
+**Phạm vi** bám theo phân quyền: nhân viên → phiếu mình; quản lý → thêm nhân viên cấp dưới;
+admin → tất cả. Ai chưa có phiếu trong kỳ sẽ được **tự tạo phiếu Nháp**.
+
+**Chống điền sai — 2 lớp:**
+
+*Lớp 1 — chặn ngay trong Excel:*
+- Username & Nhóm mục tiêu: **dropdown**, không gõ tự do
+- Trọng số: chỉ nhận số `0 < x ≤ 100`; Kết quả: `0 ≤ x ≤ 100`
+- Cột **Hệ số kết quả** là công thức, **khoá không cho sửa**; sheet được protect
+- Sheet **KiemTra**: tổng trọng số từng người (SUMIF), **tô đỏ khi ≠ 100**
+- Sheet ẩn `_meta`: marker + version + kỳ → chống nộp nhầm kỳ / dùng template cũ
+
+*Lớp 2 — kiểm tra khi upload:*
+- Đúng template & đúng version, đúng kỳ
+- Username phải nằm trong phạm vi quyền; Nhóm phải hợp lệ; các trường bắt buộc không trống
+- Tổng trọng số mỗi người = 100 (±0.01); tối đa 20 dòng/người
+- Chuẩn hoá số: nhận cả `40,5` và `40.5`; ô lỡ định dạng `%` (0.4) → 40
+- Chỉ ghi vào phiếu **đang Nháp**; **xem trước + liệt kê lỗi** trước khi ghi
+- RLS ở database là chốt chặn cuối
+
+> ⚠️ Lưu ý về chuẩn hoá `%`: giá trị trong khoảng 0–1 được hiểu là ô định dạng phần trăm và
+> nhân 100 (0.4 → 40). Do trọng số/kết quả thực tế luôn ≥ 1 nên đánh đổi này an toàn.
+
+> ⚠️ Nếu bạn đã chạy `schema.sql` trước đây: cần **chạy lại** file (hoặc ít nhất policy
+> `eval_insert`) để quản lý được tạo phiếu cho cấp dưới khi nhập Excel hàng loạt.
+
+---
+
 ## Cấu trúc thư mục
 
 ```
 src/
   lib/          supabase.js (client + gắn JWT), constants.js (nhóm KPI, trạng thái, kỳ)
+                excel.js (tạo/đọc template Excel + kiểm tra dữ liệu)
   context/      AuthContext.jsx (đăng nhập qua Edge Function, JWT, vai trò)
   components/   Layout, ProtectedRoute, Spinner
-  pages/        Login, Dashboard, EvaluationList, EvaluationForm, ManagerReview, Admin
+  pages/        Login, Dashboard, EvaluationList, EvaluationForm, ManagerReview,
+                ExcelImport (nhập/xuất hàng loạt), Admin
 supabase/
   schema.sql            bảng KPI + RLS + view kpi_users (dùng chung users của DA)
   functions/login/      Edge Function xác thực mật khẩu (SHA-256 giống DA) + cấp JWT

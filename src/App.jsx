@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard'
 import EvaluationList from './pages/EvaluationList'
 import EvaluationForm from './pages/EvaluationForm'
 import ManagerReview from './pages/ManagerReview'
+import ExcelImport from './pages/ExcelImport'
 import Admin from './pages/Admin'
 
 export default function App() {
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/danh-gia" element={<EvaluationList />} />
         <Route path="/danh-gia/:id" element={<EvaluationForm />} />
+        <Route path="/excel" element={<ExcelImport />} />
         <Route
           path="/duyet"
           element={

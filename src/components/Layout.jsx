@@ -38,6 +38,9 @@ export default function Layout() {
               <NavLink to="/danh-gia" className={navClass}>
                 Phiếu của tôi
               </NavLink>
+              <NavLink to="/excel" className={navClass}>
+                Nhập Excel
+              </NavLink>
               {isManager && (
                 <NavLink to="/duyet" className={navClass}>
                   Duyệt KPI

@@ -185,10 +185,12 @@ create policy eval_select on public.evaluations
     or kpi_is_admin()
   );
 
+-- Tạo phiếu: cho chính mình, hoặc quản lý tạo cho cấp dưới (nhập Excel hàng loạt),
+-- với điều kiện kỳ đang mở. Admin tạo được mọi trường hợp.
 drop policy if exists eval_insert on public.evaluations;
 create policy eval_insert on public.evaluations
   for insert to authenticated with check (
-    (username = current_username()
+    ((username = current_username() or kpi_is_manager_of(username))
       and exists (select 1 from public.kpi_periods p
                   where p.period = evaluations.period and p.is_open))
     or kpi_is_admin()
