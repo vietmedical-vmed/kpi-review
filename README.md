@@ -80,9 +80,18 @@ npm run dev
 Mở http://localhost:5173, đăng nhập bằng **username + mật khẩu DA**.
 
 Với admin, vào **Quản trị** để:
-- Gán **quản lý trực tiếp** cho từng nhân viên (quyết định ai duyệt phiếu của ai).
-- Bật **Admin KPI** cho người phụ trách.
-- Mở/khoá **kỳ đánh giá** theo tháng.
+- **Nhân sự & phân quyền**: gán quản lý trực tiếp cho từng người, bật **Admin KPI**.
+- **Sơ đồ tổ chức**: chọn 1 quản lý → **tick nhiều cấp dưới cùng lúc** (có tìm kiếm, lọc theo
+  Miền, chặn vòng lặp phân cấp). Cách nhanh nhất khi set up đầu kỳ.
+- **Kỳ đánh giá**: mở/khoá theo tháng.
+
+> Quan hệ quản lý lưu ở `kpi_profiles.manager_username` (trỏ từ nhân viên **lên** quản lý).
+> Ai có ít nhất 1 cấp dưới sẽ tự động có quyền duyệt KPI của những người đó.
+> Gán nhanh bằng SQL:
+> ```sql
+> update public.kpi_profiles set manager_username = 'username_quan_ly'
+> where username in ('nv1','nv2','nv3');
+> ```
 
 ---
 
