@@ -57,7 +57,7 @@ Deno.serve(async (req) => {
   )
 
   const { data: user } = await supabase
-    .from('users')
+    .schema('shared').from('users')
     .select('*')
     .eq('username', username)
     .maybeSingle()
