@@ -26,6 +26,13 @@ function authFetch(input, init = {}) {
 }
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  // Toàn bộ bảng riêng của app KPI (evaluations, objectives, kpi_profiles,
+  // kpi_periods, kpi_users) đã tách sang schema app_kpi. Đặt schema mặc định
+  // ở đây để mọi .from(...) trỏ đúng app_kpi — không phải sửa từng lời gọi.
+  // (Bảng dùng chung public.users chỉ được đọc gián tiếp qua view kpi_users,
+  //  cũng đã nằm trong app_kpi, nên không có lời gọi nào cần schema public.)
+  // Yêu cầu: "app_kpi" phải được thêm vào Settings → API → Exposed schemas.
+  db: { schema: 'app_kpi' },
   auth: {
     persistSession: false,
     autoRefreshToken: false,
