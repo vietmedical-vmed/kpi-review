@@ -2,6 +2,11 @@ import { useState } from 'react'
 import { Navigate, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 
+const inputStyle = {
+  width: '100%', padding: '8px 12px', border: '1px solid #dadde1', borderRadius: 6,
+  fontSize: 14, outline: 'none', boxSizing: 'border-box', marginBottom: 10,
+}
+
 export default function Login() {
   const { username, signIn } = useAuth()
   const navigate = useNavigate()
@@ -27,50 +32,44 @@ export default function Login() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center px-4" style={{ background: '#f0f2f5' }}>
-      <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
-        <img src="/logo.png" alt="VietMedical" className="mx-auto mb-6 h-12" />
-        <h1 className="mb-5 text-center text-lg font-bold uppercase">
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#f0f2f5', padding: 16 }}>
+      <form onSubmit={handleSubmit} style={{
+        background: '#fff', borderRadius: 8,
+        boxShadow: '0 2px 4px rgba(0,0,0,0.1), 0 8px 16px rgba(0,0,0,0.1)',
+        border: '1px solid #dadde1', padding: 24, width: '100%', maxWidth: 360, boxSizing: 'border-box',
+      }}>
+        <img src="/logo.png" alt="VietMedical" style={{ height: 48, display: 'block', margin: '0 auto 24px' }} />
+        <h2 style={{ fontSize: 18, fontWeight: 700, margin: '0 0 20px', textAlign: 'center', textTransform: 'uppercase' }}>
           ĐÁNH GIÁ KPI HÀNG THÁNG
-        </h1>
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <input
-            type="text"
-            required
-            autoComplete="username"
-            value={uname}
-            onChange={(e) => setUname(e.target.value)}
-            className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-            placeholder="Tài khoản"
-          />
-          <input
-            type="password"
-            required
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-            placeholder="Mật khẩu"
-          />
-          <label className="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer">
-            <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-            Ghi nhớ đăng nhập trên thiết bị này
-          </label>
-          {error && (
-            <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
-              {error}
-            </div>
-          )}
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
-          >
-            {loading ? 'Đang đăng nhập...' : 'Đăng nhập'}
-          </button>
-        </form>
-      </div>
-      <div className="mt-6 text-center text-[11px] text-slate-400">
+        </h2>
+        <input
+          type="text" required autoComplete="username" autoFocus
+          value={uname} onChange={(e) => setUname(e.target.value)}
+          placeholder="Tài khoản" style={inputStyle}
+        />
+        <input
+          type="password" required autoComplete="current-password"
+          value={password} onChange={(e) => setPassword(e.target.value)}
+          placeholder="Mật khẩu" style={{ ...inputStyle, marginBottom: 0 }}
+        />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, fontSize: 12, color: '#65676b', cursor: 'pointer' }}>
+          <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+          Ghi nhớ đăng nhập trên thiết bị này
+        </label>
+        {error && (
+          <div style={{ marginTop: 12, fontSize: 12, color: '#fa383e', display: 'flex', alignItems: 'center', gap: 6 }}>
+            {error}
+          </div>
+        )}
+        <button type="submit" disabled={loading} style={{
+          width: '100%', marginTop: 16, background: '#1877f2', color: '#fff',
+          padding: '8px 12px', borderRadius: 6, fontSize: 15, fontWeight: 700,
+          border: 'none', opacity: loading ? 0.7 : 1, cursor: loading ? 'not-allowed' : 'pointer',
+        }}>
+          {loading ? 'Đang đăng nhập...' : 'Đăng nhập'}
+        </button>
+      </form>
+      <div style={{ marginTop: 24, textAlign: 'center', fontSize: 11, color: '#8a8d91' }}>
         Designed and developed by Do Hoang Giang
       </div>
     </div>
