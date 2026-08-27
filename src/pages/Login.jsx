@@ -28,7 +28,7 @@ export default function Login() {
   return (
     <div className="flex min-h-screen items-center justify-center px-4">
       <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
-        <img src="/logo.svg" alt="VietMedical" className="mx-auto mb-4 h-12" />
+        <img src="/logo.png" alt="VietMedical" className="mx-auto mb-4 h-12" />
         <h1 className="mb-1 text-center text-xl font-bold text-brand-700">
           Đánh giá KPI hàng tháng
         </h1>
