@@ -9,6 +9,7 @@ export default function Login() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [remember, setRemember] = useState(true)
 
   if (username) return <Navigate to="/" replace />
 
@@ -26,44 +27,35 @@ export default function Login() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4">
+    <div className="flex min-h-screen flex-col items-center justify-center px-4" style={{ background: '#f0f2f5' }}>
       <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
-        <img src="/logo.png" alt="VietMedical" className="mx-auto mb-4 h-12" />
-        <h1 className="mb-1 text-center text-xl font-bold text-brand-700">
-          Đánh giá KPI hàng tháng
+        <img src="/logo.png" alt="VietMedical" className="mx-auto mb-6 h-12" />
+        <h1 className="mb-5 text-center text-lg font-bold uppercase">
+          ĐÁNH GIÁ KPI HÀNG THÁNG
         </h1>
-        <p className="mb-6 text-center text-sm text-slate-500">
-          Đăng nhập bằng tài khoản DA của bạn
-        </p>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">
-              Tên đăng nhập
-            </label>
-            <input
-              type="text"
-              required
-              autoComplete="username"
-              value={uname}
-              onChange={(e) => setUname(e.target.value)}
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-              placeholder="username"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-sm font-medium text-slate-700">
-              Mật khẩu
-            </label>
-            <input
-              type="password"
-              required
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-              placeholder="••••••••"
-            />
-          </div>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <input
+            type="text"
+            required
+            autoComplete="username"
+            value={uname}
+            onChange={(e) => setUname(e.target.value)}
+            className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            placeholder="Tài khoản"
+          />
+          <input
+            type="password"
+            required
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            placeholder="Mật khẩu"
+          />
+          <label className="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer">
+            <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+            Ghi nhớ đăng nhập trên thiết bị này
+          </label>
           {error && (
             <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
               {error}
@@ -77,6 +69,9 @@ export default function Login() {
             {loading ? 'Đang đăng nhập...' : 'Đăng nhập'}
           </button>
         </form>
+      </div>
+      <div className="mt-6 text-center text-[11px] text-slate-400">
+        Designed and developed by Do Hoang Giang
       </div>
     </div>
   )
