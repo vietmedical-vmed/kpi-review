@@ -463,6 +463,8 @@ const frac = (v) => (v === null || v === undefined || v === '' ? null : round2(v
  */
 export function personLabel(u) {
   if (!u) return ''
+  // Nhân viên không có tài khoản: chỉ họ tên
+  if (!u.username) return u.ho_va_ten || ''
   return u.ho_va_ten ? `${u.ho_va_ten} (${u.username})` : u.username
 }
 
@@ -499,7 +501,8 @@ export async function buildStandardWorkbook({
   styleLabel(r1.getCell(4, 1))
   r1.getCell(4, 1).font = { bold: true, color: { argb: C.ink } }
   const who = r1.getCell(4, 3)
-  who.value = username ? personLabel({ username, ho_va_ten: personName }) : '[Chọn nhân viên]'
+  who.value =
+    username || personName ? personLabel({ username, ho_va_ten: personName }) : '[Chọn hoặc gõ tên nhân viên]'
   styleInput(who)
   who.font = { bold: true, color: { argb: C.ink } }
   r1.getCell(4, 4).value = 'KỲ ĐÁNH GIÁ'
@@ -522,7 +525,7 @@ export async function buildStandardWorkbook({
       showErrorMessage: true,
       errorStyle: 'warning',
       errorTitle: 'Nhân viên',
-      error: 'Chọn nhân viên từ danh sách xổ xuống.',
+      error: 'Tên chưa có trong danh sách. Bấm Yes để giữ (nhân viên chưa có tài khoản).',
     }
   }
   ;['STT', 'TÊN MỤC TIÊU', 'CÁCH THỨC ĐO', 'TRỌNG SỐ', 'MỤC TIÊU CẦN ĐẠT'].forEach((h, i) =>
@@ -687,7 +690,7 @@ export async function buildTeamSummary({ period, people }) {
     const mgr = e && Number(e.manager_total) ? Number(e.manager_total) / 100 : null
     const fin = e ? (mgr ?? self) : null
     const vals = [
-      i + 1, p.username, p.ho_va_ten, p.mien || '', p.bu || '', p.manager || '',
+      i + 1, p.username || '(không TK)', p.ho_va_ten, p.mien || '', p.bu || '', p.manager || '',
       e ? STATUS_LABELS[e.status] : 'Chưa có phiếu',
       p.objectives?.length || 0,
       self, mgr, mgr !== null && self !== null ? mgr - self : null, fin,
@@ -717,7 +720,7 @@ export async function buildTeamSummary({ period, people }) {
   for (const p of people) {
     ;(p.objectives || []).forEach((o, i) => {
       const vals = [
-        p.username, p.ho_va_ten, i + 1, o.name || o.category, o.target, o.measure_method,
+        p.username || '(không TK)', p.ho_va_ten, i + 1, o.name || o.category, o.target, o.measure_method,
         frac(o.weight), o.reference_doc, frac(o.self_result), frac(o.manager_result),
       ]
       vals.forEach((v, c) => {

@@ -42,7 +42,9 @@ export default function Dashboard() {
             .from('kpi_profiles')
             .select('username')
             .eq('manager_username', username)
-          q = q.in('username', (reports || []).map((r) => r.username).concat('__none__'))
+          // Cấp dưới có tài khoản + nhân viên không tài khoản do mình phụ trách
+          const list = (reports || []).map((r) => `"${r.username}"`).concat('"__none__"').join(',')
+          q = q.or(`username.in.(${list}),and(username.is.null,manager_username.eq."${username}")`)
         }
         const { count } = await q
         setPending(count || 0)

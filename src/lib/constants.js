@@ -107,3 +107,16 @@ export function shiftPeriod(period, delta) {
   const d = new Date(y, m - 1 + delta, 1)
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
+
+// ---------------------------------------------------------------- NHÂN VIÊN
+// Phiếu có thể KHÔNG gắn tài khoản (nhân viên không được cấp TK, leader nhập hộ):
+// khi đó nhận diện bằng employee_key (tên chuẩn hoá) + manager_username (N+1 phụ trách).
+export function personKey(ev) {
+  if (!ev) return ''
+  return ev.username || `name:${ev.employee_key}|${ev.manager_username}`
+}
+
+// Tên hiển thị: ưu tiên tên lấy từ file Excel, sau đó tên trong hệ thống
+export function displayName(ev, user) {
+  return ev?.employee_name || user?.ho_va_ten || ev?.username || ''
+}

@@ -28,6 +28,7 @@ export default function ExcelImport() {
   const [periods, setPeriods] = useState([])
   const [period, setPeriod] = useState('')
   const [scopeUsers, setScopeUsers] = useState([])
+  const [noAccount, setNoAccount] = useState([]) // [{ key, name }] nhân viên không TK mình phụ trách
   const [downloadUser, setDownloadUser] = useState('')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
@@ -55,12 +56,27 @@ export default function ExcelImport() {
     return data || []
   }
 
+  // Nhân viên KHÔNG có tài khoản do mình phụ trách (đã từng nhập phiếu)
+  async function loadNoAccount() {
+    let q = supabase
+      .from('evaluations')
+      .select('employee_key, employee_name, manager_username, period')
+      .is('username', null)
+      .order('period', { ascending: false })
+    if (!isAdmin) q = q.eq('manager_username', username)
+    const { data } = await q
+    const m = new Map()
+    for (const e of data || []) if (!m.has(e.employee_key)) m.set(e.employee_key, { key: e.employee_key, name: e.employee_name })
+    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name, 'vi'))
+  }
+
   useEffect(() => {
     async function init() {
-      const [ps, users] = await Promise.all([loadPeriods(), loadScopeUsers()])
+      const [ps, users, na] = await Promise.all([loadPeriods(), loadScopeUsers(), loadNoAccount()])
       setPeriods(ps)
       setPeriod(defaultPeriod(ps))
       setScopeUsers(users)
+      setNoAccount(na)
       setDownloadUser(username)
       setLoading(false)
     }
@@ -79,59 +95,42 @@ export default function ExcelImport() {
   const userMap = useMemo(() => new Map(scopeUsers.map((u) => [u.username, u])), [scopeUsers])
 
   /**
-   * Xác định file thuộc nhân viên nào (leader có thể upload hộ cả đội, tên file tuỳ ý):
-   *  1. Ô "NHÂN VIÊN" trong file — "Họ tên (username)" hoặc họ tên
-   *  2. Tên file CHỨA đầy đủ họ tên / username của đúng 1 người trong phạm vi
-   *  3. Phạm vi chỉ có 1 người
-   * Không chắc chắn -> để trống cho người dùng chọn.
+   * Tên nhân viên LẤY TỪ FILE (nhiều nhân viên không có tài khoản):
+   *  - Ô "NHÂN VIÊN" trong file; trống thì lấy phần đầu tên file (trước dấu "_").
+   *  - Liên kết tài khoản chỉ khi khớp chắc chắn: "(username)" trong ô, hoặc họ tên
+   *    trùng khớp 1 tài khoản trong phạm vi. Không khớp -> phiếu không tài khoản,
+   *    N+1 phụ trách = người upload.
    */
   function resolvePerson(parsed) {
     const idText = (parsed.identity?.person || '').trim()
-    if (idText) {
-      const m = idText.match(/\(([^()]+)\)\s*$/)
-      const un = m?.[1]?.trim().toLowerCase()
-      const byUn = un && scopeUsers.find((u) => u.username.toLowerCase() === un)
-      if (byUn) return { username: byUn.username, by: 'file' }
-      const byName = userByName.get(normalizeName(idText.replace(/\([^()]*\)\s*$/, '')))
-      if (byName) return { username: byName.username, by: 'file' }
-      return {
-        username: '',
-        by: null,
-        note: `Ô NHÂN VIÊN trong file ghi "${idText}" — không khớp ai trong phạm vi của bạn.`,
-      }
-    }
-    const base = String(parsed.fileName || '').replace(/\.[^.]+$/, '')
-    const fn = ` ${normalizeName(base.replace(/[_\-.,()]+/g, ' '))} `
-    const tokens = new Set(base.toLowerCase().split(/[\s_\-,()]+/).filter(Boolean))
-    let hits = scopeUsers.filter(
-      (u) =>
-        (u.ho_va_ten && fn.includes(` ${normalizeName(u.ho_va_ten)} `)) ||
-        tokens.has(u.username.toLowerCase())
-    )
-    if (hits.length > 1) {
-      // Ưu tiên tên dài nhất (vd "Nguyễn Văn An" thắng "Văn An")
-      const len = (u) => normalizeName(u.ho_va_ten).length
-      const max = Math.max(...hits.map(len))
-      const top = hits.filter((u) => len(u) === max)
-      if (top.length === 1) hits = top
-    }
-    if (hits.length === 1) return { username: hits[0].username, by: 'filename' }
-    if (hits.length > 1)
-      return { username: '', by: null, note: `Tên file khớp nhiều người (${hits.map((u) => u.ho_va_ten).join(', ')}).` }
-    if (scopeUsers.length === 1) return { username: scopeUsers[0].username, by: 'single' }
-    return { username: '', by: null }
+    const fromCell = idText.replace(/\s*\([^()]*\)\s*$/, '').trim()
+    const fnName = (parsed.personName || '').trim()
+    const fnLooksLikeName =
+      fnName && !/\d/.test(fnName) && !/kpi|danh gia|dang ky|dang ki|template|mau/.test(normalizeName(fnName))
+    const name = fromCell || (fnLooksLikeName ? fnName : '')
+    const nameFrom = fromCell ? 'file' : name ? 'filename' : null
+    const m = idText.match(/\(([^()]+)\)\s*$/)
+    const un = m?.[1]?.trim().toLowerCase()
+    const byUn = un && scopeUsers.find((u) => u.username.toLowerCase() === un)
+    const byName = name && userByName.get(normalizeName(name))
+    const acc = byUn || byName || null
+    return { employeeName: name, nameFrom, username: acc?.username || '' }
   }
   const periodMap = useMemo(() => new Map(periods.map((p) => [p.period, p])), [periods])
 
   // ------------------------------------------------- TẢI MẪU CHUẨN
-  async function exportFor(uname) {
-    const u = userMap.get(uname)
-    const { data: ev } = await supabase
-      .from('evaluations')
-      .select('*')
-      .eq('username', uname)
-      .eq('period', period)
-      .maybeSingle()
+  // key: username, hoặc "name:<employee_key>" cho nhân viên không tài khoản
+  async function exportFor(key) {
+    const isNa = key.startsWith('name:')
+    const naKey = isNa ? key.slice(5) : null
+    const u = isNa ? null : userMap.get(key)
+    const na = isNa ? noAccount.find((x) => x.key === naKey) : null
+    let q = supabase.from('evaluations').select('*').eq('period', period)
+    q = isNa ? q.is('username', null).eq('employee_key', naKey) : q.eq('username', key)
+    if (isNa && !isAdmin) q = q.eq('manager_username', username)
+    const { data: evs } = await q.limit(1)
+    const ev = evs?.[0] || null
+    const name = ev?.employee_name || na?.name || u?.ho_va_ten || key
     let objectives = []
     if (ev) {
       const { data: objs } = await supabase
@@ -142,22 +141,24 @@ export default function ExcelImport() {
       objectives = objs || []
     }
     const blob = await buildStandardWorkbook({
-      personName: u?.ho_va_ten || uname,
-      username: uname,
-      people: scopeUsers,
+      personName: name,
+      username: isNa ? '' : key,
+      people: [...scopeUsers, ...noAccount.map((x) => ({ username: '', ho_va_ten: x.name }))],
       period,
       objectives,
       registrationComment: ev?.registration_comment || '',
       managerComment: ev?.manager_comment || '',
     })
-    downloadBlob(blob, standardFileName(u?.ho_va_ten || uname, period))
+    downloadBlob(blob, standardFileName(name, period))
   }
 
   async function handleDownload(all = false) {
     setError('')
     setBusy(all ? 'download-all' : 'download')
     try {
-      const list = all ? scopeUsers.map((u) => u.username) : [downloadUser]
+      const list = all
+        ? [...scopeUsers.map((u) => u.username), ...noAccount.map((x) => `name:${x.key}`)]
+        : [downloadUser]
       for (const un of list) {
         await exportFor(un)
         if (all) await new Promise((r) => setTimeout(r, 400)) // tránh trình duyệt chặn tải nhiều file
@@ -171,8 +172,8 @@ export default function ExcelImport() {
 
   // ------------------------------------------------- ĐỌC FILE
   function defaultStatus(parsed, uname) {
-    const self = uname === username
-    if (!self && (isManager || isAdmin)) {
+    const self = !!uname && uname === username
+    if (!self && (isManager || isAdmin || !uname)) {
       if (parsed.hasManagerResults) return 'reviewed'
       if (parsed.hasSelfResults) return 'submitted'
     }
@@ -195,8 +196,8 @@ export default function ExcelImport() {
           id: ++fileSeq,
           parsed,
           username: uname,
-          matchedBy: who.by,
-          matchNote: who.note || '',
+          employeeName: who.employeeName,
+          nameFrom: who.nameFrom,
           period: parsed.period || period,
           targetStatus: parsed.fatal ? 'draft' : defaultStatus(parsed, uname),
         })
@@ -210,29 +211,48 @@ export default function ExcelImport() {
     }
   }
 
-  // Lấy trạng thái phiếu hiện có cho các cặp (username, period) trong danh sách
-  const [existing, setExisting] = useState({}) // key "user|period" -> evaluation
+  // Khoá nhận diện 1 dòng: tài khoản, hoặc tên chuẩn hoá (phiếu không tài khoản)
+  const itemKey = (it) =>
+    it.username ? it.username : it.employeeName ? `name:${normalizeName(it.employeeName)}` : ''
+
+  // Lấy trạng thái phiếu hiện có cho các cặp (người, kỳ) trong danh sách
+  const [existing, setExisting] = useState({}) // key "personKey|period" -> evaluation
   useEffect(() => {
-    const pairs = items.filter((it) => it.username && it.period)
-    if (!pairs.length) return
-    const byPeriod = {}
-    for (const it of pairs) (byPeriod[it.period] ||= new Set()).add(it.username)
+    const list = items.filter((it) => itemKey(it) && it.period)
+    if (!list.length) return
     ;(async () => {
       const next = {}
-      for (const [p, set] of Object.entries(byPeriod)) {
-        const { data } = await supabase
-          .from('evaluations')
-          .select('id, username, period, status')
-          .eq('period', p)
-          .in('username', [...set])
-        for (const ev of data || []) next[`${ev.username}|${ev.period}`] = ev
+      const byPeriod = {}
+      for (const it of list) (byPeriod[it.period] ||= []).push(it)
+      for (const [p, its] of Object.entries(byPeriod)) {
+        const accs = [...new Set(its.filter((x) => x.username).map((x) => x.username))]
+        const keys = [...new Set(its.filter((x) => !x.username).map((x) => normalizeName(x.employeeName)))]
+        if (accs.length) {
+          const { data } = await supabase
+            .from('evaluations')
+            .select('id, username, period, status')
+            .eq('period', p)
+            .in('username', accs)
+          for (const ev of data || []) next[`${ev.username}|${p}`] = ev
+        }
+        if (keys.length) {
+          let q = supabase
+            .from('evaluations')
+            .select('id, employee_key, manager_username, period, status')
+            .eq('period', p)
+            .is('username', null)
+            .in('employee_key', keys)
+            .eq('manager_username', username)
+          const { data } = await q
+          for (const ev of data || []) next[`name:${ev.employee_key}|${p}`] = ev
+        }
       }
       setExisting(next)
       // Không tự hạ trạng thái phiếu đang có (vd Đã chấm -> Chờ duyệt) trừ khi người dùng tự chọn
       setItems((prev) => {
         let changed = false
         const out = prev.map((it) => {
-          const ev = next[`${it.username}|${it.period}`]
+          const ev = next[`${itemKey(it)}|${it.period}`]
           if (!ev || it.statusTouched || it.parsed.fatal) return it
           const cur = STATUS_ORDER.indexOf(it.targetStatus)
           const has = STATUS_ORDER.indexOf(ev.status)
@@ -246,6 +266,7 @@ export default function ExcelImport() {
         return changed ? out : prev
       })
     })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items])
 
   function updateItem(id, changes) {
@@ -253,9 +274,8 @@ export default function ExcelImport() {
       prev.map((it) => {
         if (it.id !== id) return it
         const next = { ...it, ...changes }
+        if (changes.employeeName !== undefined) next.nameFrom = null
         if (changes.username !== undefined) {
-          next.matchedBy = changes.username ? 'manual' : null
-          next.matchNote = ''
           next.statusTouched = false
           if (!it.parsed.fatal) next.targetStatus = defaultStatus(it.parsed, changes.username)
         }
@@ -269,19 +289,18 @@ export default function ExcelImport() {
     const out = []
     if (it.parsed.fatal) return [it.parsed.fatal]
     out.push(...it.parsed.errors)
-    if (!it.username)
-      out.push(
-        `${it.matchNote ? it.matchNote + ' ' : 'Chưa xác định được nhân viên (ô NHÂN VIÊN trong file trống, tên file không chứa tên ai trong phạm vi). '}Hãy chọn nhân viên.`
-      )
+    if (!it.username && !it.employeeName?.trim())
+      out.push('Chưa có tên nhân viên — điền ô NHÂN VIÊN trong file hoặc nhập tên ở cột Nhân viên.')
     if (!it.period) out.push('Chưa xác định kỳ đánh giá.')
     else if (!isPeriodAllowed(it.period)) out.push(`Kỳ ${formatPeriod(it.period)} nằm ngoài khoảng cho phép.`)
     else {
       const p = periodMap.get(it.period)
       if (p && !p.is_open && !isAdmin) out.push(`Kỳ ${formatPeriod(it.period)} đã bị khoá.`)
     }
-    const dup = items.filter((x) => x.username && x.username === it.username && x.period === it.period)
-    if (it.username && dup.length > 1 && dup[0].id !== it.id) out.push('Trùng nhân viên & kỳ với file khác phía trên.')
-    const ev = existing[`${it.username}|${it.period}`]
+    const k = itemKey(it)
+    const dup = items.filter((x) => k && itemKey(x) === k && x.period === it.period)
+    if (k && dup.length > 1 && dup[0].id !== it.id) out.push('Trùng nhân viên & kỳ với file khác phía trên.')
+    const ev = existing[`${k}|${it.period}`]
     if (ev) {
       const self = it.username === username
       if (ev.status === 'approved' && !isAdmin) out.push('Phiếu đã Chốt — chỉ admin được ghi đè.')
@@ -292,7 +311,7 @@ export default function ExcelImport() {
   }
 
   function allowedStatuses(it) {
-    const self = it.username === username
+    const self = !!it.username && it.username === username
     if (isAdmin) return STATUS_ORDER
     if (self) return it.parsed.hasSelfResults ? ['draft', 'submitted'] : ['draft']
     return STATUS_ORDER
@@ -303,18 +322,22 @@ export default function ExcelImport() {
   // ------------------------------------------------- ÁP DỤNG
   async function applyOne(it) {
     const p = it.parsed
-    let { data: ev, error: findErr } = await supabase
-      .from('evaluations')
-      .select('*')
-      .eq('username', it.username)
-      .eq('period', it.period)
-      .maybeSingle()
+    const name = (it.employeeName || '').trim()
+    const key = normalizeName(name)
+    let find = supabase.from('evaluations').select('*').eq('period', it.period)
+    find = it.username
+      ? find.eq('username', it.username)
+      : find.is('username', null).eq('employee_key', key).eq('manager_username', username)
+    let { data: ev, error: findErr } = await find.maybeSingle()
     if (findErr) throw findErr
     let created = false
     if (!ev) {
+      const row = it.username
+        ? { username: it.username, period: it.period, status: 'draft', employee_name: name || null }
+        : { username: null, employee_name: name, employee_key: key, manager_username: username, period: it.period, status: 'draft' }
       const { data, error } = await supabase
         .from('evaluations')
-        .insert({ username: it.username, period: it.period, status: 'draft' })
+        .insert(row)
         .select()
         .single()
       if (error) throw new Error('không tạo được phiếu: ' + error.message)
@@ -351,6 +374,7 @@ export default function ExcelImport() {
       imported_by: username,
       status: st,
     }
+    if (name) upd.employee_name = name
     if (p.managerComment) upd.manager_comment = p.managerComment
     const rank = STATUS_ORDER.indexOf(st)
     if (rank >= 1 && !ev.submitted_at) upd.submitted_at = now
@@ -367,7 +391,7 @@ export default function ExcelImport() {
     const summary = { created: 0, updated: 0, rows: 0, failed: [] }
     const done = new Set()
     for (const it of ready) {
-      const who = userMap.get(it.username)?.ho_va_ten || it.username
+      const who = it.employeeName || userMap.get(it.username)?.ho_va_ten || it.username
       try {
         const r = await applyOne(it)
         r.created ? summary.created++ : summary.updated++
@@ -378,6 +402,7 @@ export default function ExcelImport() {
       }
     }
     setItems((prev) => prev.filter((x) => !done.has(x.id)))
+    setNoAccount(await loadNoAccount())
     setResult(summary)
     setBusy('')
   }
@@ -409,8 +434,8 @@ export default function ExcelImport() {
         <h2 className="mb-1 font-semibold text-slate-800">1. Tải mẫu chuẩn</h2>
         <p className="mb-3 text-sm text-slate-500">
           File được điền sẵn dữ liệu đã có trên hệ thống (nếu có). Dòng 4 sheet "Đăng ký đầu tháng" có ô{' '}
-          <b>NHÂN VIÊN</b> (chọn từ danh sách) và <b>KỲ ĐÁNH GIÁ</b> — hệ thống dựa vào 2 ô này để biết file của ai,
-          nên leader có thể gom file cả đội (đặt tên file tuỳ ý) rồi upload một lần.
+          <b>NHÂN VIÊN</b> và <b>KỲ ĐÁNH GIÁ</b>. <b>Tên nhân viên lấy theo ô này</b> (chọn trong danh sách hoặc gõ tên
+          người chưa có tài khoản) — leader gom file cả đội, đặt tên file tuỳ ý rồi upload một lần.
         </p>
         <div className="flex flex-wrap items-end gap-3">
           <Field label="Kỳ đánh giá">
@@ -424,12 +449,23 @@ export default function ExcelImport() {
           </Field>
           <Field label="Nhân viên">
             <select value={downloadUser} onChange={(e) => setDownloadUser(e.target.value)} className="input min-w-[14rem]">
-              {scopeUsers.map((u) => (
-                <option key={u.username} value={u.username}>
-                  {u.ho_va_ten || u.username}
-                  {u.username === username ? ' (tôi)' : ''}
-                </option>
-              ))}
+              <optgroup label="Có tài khoản">
+                {scopeUsers.map((u) => (
+                  <option key={u.username} value={u.username}>
+                    {u.ho_va_ten || u.username}
+                    {u.username === username ? ' (tôi)' : ''}
+                  </option>
+                ))}
+              </optgroup>
+              {noAccount.length > 0 && (
+                <optgroup label="Không có tài khoản">
+                  {noAccount.map((x) => (
+                    <option key={x.key} value={`name:${x.key}`}>
+                      {x.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </select>
           </Field>
           <button
@@ -439,13 +475,13 @@ export default function ExcelImport() {
           >
             {busy === 'download' ? 'Đang tạo...' : '⬇ Tải file'}
           </button>
-          {scopeUsers.length > 1 && (
+          {scopeUsers.length + noAccount.length > 1 && (
             <button
               onClick={() => handleDownload(true)}
               disabled={!period || !!busy}
               className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
             >
-              {busy === 'download-all' ? 'Đang tạo...' : `⬇ Tải cho cả đội (${scopeUsers.length} file)`}
+              {busy === 'download-all' ? 'Đang tạo...' : `⬇ Tải cho cả đội (${scopeUsers.length + noAccount.length} file)`}
             </button>
           )}
         </div>
@@ -506,7 +542,7 @@ export default function ExcelImport() {
                 {items.map((it) => {
                   const p = it.parsed
                   const errs = blockers(it)
-                  const ev = existing[`${it.username}|${it.period}`]
+                  const ev = existing[`${itemKey(it)}|${it.period}`]
                   const open = expanded === it.id
                   return (
                     <FileRows
@@ -577,15 +613,13 @@ function Field({ label, children }) {
   )
 }
 
-const MATCH_HINTS = {
-  file: ['Theo ô NHÂN VIÊN trong file', 'text-green-700'],
-  filename: ['Theo tên file — kiểm tra lại', 'text-amber-700'],
-  single: ['Mặc định (chỉ 1 người) — kiểm tra lại', 'text-amber-700'],
-  manual: ['Đã chọn tay', 'text-slate-500'],
+const NAME_HINTS = {
+  file: ['Tên lấy từ ô NHÂN VIÊN trong file', 'text-green-700'],
+  filename: ['Tên lấy từ tên file — kiểm tra lại', 'text-amber-700'],
 }
-function MatchHint({ by }) {
-  if (!by) return null
-  const [text, cls] = MATCH_HINTS[by]
+function NameHint({ from }) {
+  if (!from) return null
+  const [text, cls] = NAME_HINTS[from]
   return <div className={`mt-0.5 text-xs ${cls}`}>{text}</div>
 }
 
@@ -611,19 +645,26 @@ function FileRows({ it, p, errs, ev, open, scopeUsers, periods, allowed, onToggl
           )}
         </td>
         <td className="px-3 py-2">
+          <input
+            value={it.employeeName || ''}
+            onChange={(e) => onChange({ employeeName: e.target.value })}
+            placeholder="Họ tên nhân viên"
+            className={`input w-52 ${it.employeeName?.trim() || it.username ? '' : 'border-red-400'}`}
+          />
+          <NameHint from={it.nameFrom} />
           <select
             value={it.username}
             onChange={(e) => onChange({ username: e.target.value })}
-            className={`input max-w-[13rem] ${it.username ? '' : 'border-red-400'}`}
+            className="input mt-1 w-52 py-1 text-xs"
+            title="Liên kết với tài khoản (nếu nhân viên có tài khoản)"
           >
-            <option value="">— Chọn —</option>
+            <option value="">Không có tài khoản</option>
             {scopeUsers.map((u) => (
               <option key={u.username} value={u.username}>
-                {u.ho_va_ten || u.username}
+                TK: {u.ho_va_ten || u.username}
               </option>
             ))}
           </select>
-          <MatchHint by={it.matchedBy} />
         </td>
         <td className="px-3 py-2">
           <select value={it.period} onChange={(e) => onChange({ period: e.target.value })} className="input">

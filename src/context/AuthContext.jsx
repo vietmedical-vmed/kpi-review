@@ -22,7 +22,7 @@ export function AuthProvider({ children }) {
       setProfile(null)
       return
     }
-    const [{ data: userRow }, { data: kp }, { count: reportsCount }] =
+    const [{ data: userRow }, { data: kp }, { count: reportsCount }, { count: noAccCount }] =
       await Promise.all([
         supabase.from('kpi_users').select('*').eq('username', uname).maybeSingle(),
         supabase
@@ -34,11 +34,17 @@ export function AuthProvider({ children }) {
           .from('kpi_profiles')
           .select('username', { count: 'exact', head: true })
           .eq('manager_username', uname),
+        // Phiếu nhân viên không có tài khoản do mình nhập hộ (mình là N+1)
+        supabase
+          .from('evaluations')
+          .select('id', { count: 'exact', head: true })
+          .is('username', null)
+          .eq('manager_username', uname),
       ])
 
     // Admin KPI: bật cờ trong kpi_profiles HOẶC là admin của DA (khớp kpi_is_admin() ở DB)
     const isAdmin = !!kp?.is_admin || userRow?.da_role === 'admin'
-    const isManager = isAdmin || (reportsCount || 0) > 0
+    const isManager = isAdmin || (reportsCount || 0) > 0 || (noAccCount || 0) > 0
     setProfile({
       username: uname,
       ho_va_ten: userRow?.ho_va_ten || uname,

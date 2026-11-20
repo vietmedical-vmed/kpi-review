@@ -7,6 +7,7 @@ import {
   STATUS_LABELS,
   STATUS_COLORS,
   finalScore,
+  displayName,
   gradeOf,
   GRADE_COLORS,
 } from '../lib/constants'
@@ -35,7 +36,7 @@ export default function ManagerReview() {
     setRows(list)
 
     // Tra tên nhân viên cho các username xuất hiện
-    const usernames = [...new Set(list.map((e) => e.username))]
+    const usernames = [...new Set(list.map((e) => e.username).filter(Boolean))]
     if (usernames.length) {
       const { data: users } = await supabase
         .from('kpi_users')
@@ -126,7 +127,8 @@ export default function ManagerReview() {
               {rows.map((e) => (
                 <tr key={e.id} className="hover:bg-slate-50">
                   <td className="px-4 py-3 font-medium text-slate-800">
-                    {userMap[e.username]?.ho_va_ten || e.username}
+                    {displayName(e, userMap[e.username])}
+                    {!e.username && <span className="ml-1 text-xs font-normal text-slate-400">(không TK)</span>}
                   </td>
                   <td className="px-4 py-3 text-slate-600">
                     {[userMap[e.username]?.mien, userMap[e.username]?.bu]

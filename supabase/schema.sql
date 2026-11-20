@@ -358,3 +358,122 @@ on conflict (period) do nothing;
 
 -- ĐẶT ADMIN ĐẦU TIÊN: thay 'ten_dang_nhap_cua_ban' bằng username của bạn
 -- update app_kpi.kpi_profiles set is_admin = true where username = 'ten_dang_nhap_cua_ban';
+
+-- =============================================================
+--  NHÂN VIÊN KHÔNG CÓ TÀI KHOẢN
+--  (thay thế các policy evaluations/objectives ở trên; xem migration
+--   20261120030000_employees_without_account.sql)
+-- =============================================================
+alter table app_kpi.evaluations alter column username drop not null;
+
+alter table app_kpi.evaluations
+  add column if not exists employee_name    text,
+  add column if not exists employee_key     text,
+  add column if not exists manager_username text
+    references shared.users (username) on delete set null;
+
+do $$
+begin
+  if not exists (select 1 from pg_constraint
+                 where conname = 'evaluations_identity_chk'
+                   and conrelid = 'app_kpi.evaluations'::regclass) then
+    alter table app_kpi.evaluations
+      add constraint evaluations_identity_chk
+      check (username is not null
+             or (employee_key is not null and manager_username is not null));
+  end if;
+end $$;
+
+create unique index if not exists uq_eval_noaccount_period
+  on app_kpi.evaluations (employee_key, manager_username, period)
+  where username is null;
+
+create index if not exists idx_evaluations_manager
+  on app_kpi.evaluations (manager_username);
+
+-- ─── Hàm quyền ───────────────────────────────────────────────────────────
+create or replace function public.kpi_can_view_eval(u text, m text)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select case
+    when u is not null then
+      u = public.current_username() or public.kpi_is_above(u) or public.kpi_is_admin()
+    else
+      m = public.current_username() or public.kpi_is_above(m) or public.kpi_is_admin()
+  end;
+$$;
+
+create or replace function public.kpi_can_edit_eval(u text, m text)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select case
+    when u is not null then
+      u = public.current_username() or public.kpi_is_manager_of(u) or public.kpi_is_admin()
+    else
+      m = public.current_username() or public.kpi_is_admin()
+  end;
+$$;
+
+grant execute on function public.kpi_can_view_eval(text, text) to authenticated;
+grant execute on function public.kpi_can_edit_eval(text, text) to authenticated;
+
+-- ─── Policies evaluations ────────────────────────────────────────────────
+drop policy if exists eval_select on app_kpi.evaluations;
+create policy eval_select on app_kpi.evaluations
+  for select to authenticated
+  using (public.kpi_can_view_eval(username, manager_username));
+
+drop policy if exists eval_insert on app_kpi.evaluations;
+create policy eval_insert on app_kpi.evaluations
+  for insert to authenticated with check (
+    (select public.kpi_is_admin())
+    or (public.kpi_can_edit_eval(username, manager_username)
+        and not exists (select 1 from app_kpi.kpi_periods p
+                        where p.period = evaluations.period and not p.is_open))
+  );
+
+drop policy if exists eval_update on app_kpi.evaluations;
+create policy eval_update on app_kpi.evaluations
+  for update to authenticated
+  using (public.kpi_can_edit_eval(username, manager_username))
+  with check (public.kpi_can_edit_eval(username, manager_username));
+
+drop policy if exists eval_delete on app_kpi.evaluations;
+create policy eval_delete on app_kpi.evaluations
+  for delete to authenticated using (
+    (select public.kpi_is_admin())
+    or (status = 'draft' and (
+          username = (select public.current_username())
+          or (username is null and manager_username = (select public.current_username()))))
+  );
+
+-- ─── Policies objectives ─────────────────────────────────────────────────
+drop policy if exists obj_select on app_kpi.objectives;
+create policy obj_select on app_kpi.objectives
+  for select to authenticated using (
+    exists (select 1 from app_kpi.evaluations e
+            where e.id = objectives.evaluation_id
+              and public.kpi_can_view_eval(e.username, e.manager_username))
+  );
+
+drop policy if exists obj_write on app_kpi.objectives;
+create policy obj_write on app_kpi.objectives
+  for all to authenticated
+  using (
+    exists (select 1 from app_kpi.evaluations e
+            where e.id = objectives.evaluation_id
+              and public.kpi_can_edit_eval(e.username, e.manager_username))
+  )
+  with check (
+    exists (select 1 from app_kpi.evaluations e
+            where e.id = objectives.evaluation_id
+              and public.kpi_can_edit_eval(e.username, e.manager_username))
+  );

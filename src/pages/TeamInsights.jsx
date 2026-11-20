@@ -10,6 +10,7 @@ import {
   shiftPeriod,
   finalScore,
   gradeOf,
+  personKey,
   round2,
   PASS_THRESHOLD,
   STATUS_LABELS,
@@ -154,6 +155,19 @@ export default function TeamInsights() {
           .lte('period', period)
         all.push(...(data || []))
       }
+      // Nhân viên KHÔNG có tài khoản: theo N+1 phụ trách (manager_username)
+      let na = supabase
+        .from('evaluations')
+        .select('*')
+        .is('username', null)
+        .gte('period', from)
+        .lte('period', period)
+      if (!(isAdmin && scope === 'tree')) {
+        const mgrs = scope === 'direct' ? [username] : [username, ...scopeNames]
+        na = na.in('manager_username', mgrs.slice(0, 300))
+      }
+      const { data: naData } = await na
+      all.push(...(naData || []))
       setEvals(all)
       const ids = all.filter((e) => e.period === period).map((e) => e.id)
       const objs = []
@@ -168,29 +182,43 @@ export default function TeamInsights() {
       setObjectives(objs)
       setLoading(false)
     })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period, scopeNames, profiles.length])
 
   // ---------- dữ liệu từng người cho kỳ đang xem
   const people = useMemo(() => {
     const evBy = new Map()
-    for (const e of evals) evBy.set(`${e.username}|${e.period}`, e)
+    for (const e of evals) evBy.set(`${personKey(e)}|${e.period}`, e)
+    // Nhân viên không tài khoản: lấy tên mới nhất từ phiếu
+    const naPeople = new Map()
+    for (const e of [...evals].sort((a, b) => b.period.localeCompare(a.period))) {
+      if (e.username) continue
+      const k = personKey(e)
+      if (!naPeople.has(k)) naPeople.set(k, { name: e.employee_name, manager: e.manager_username })
+    }
     const objBy = new Map()
     for (const o of objectives) {
       if (!objBy.has(o.evaluation_id)) objBy.set(o.evaluation_id, [])
       objBy.get(o.evaluation_id).push(o)
     }
     const prev = shiftPeriod(period || currentPeriod(), -1)
-    return scopeNames.map((un) => {
-      const u = userMap.get(un) || { username: un }
-      const ev = evBy.get(`${un}|${period}`) || null
-      const pe = evBy.get(`${un}|${prev}`) || null
+    const keys = [...scopeNames, ...naPeople.keys()]
+    return keys.map((key) => {
+      const na = naPeople.get(key)
+      const un = na ? '' : key
+      const u = na ? { ho_va_ten: na.name } : userMap.get(un) || { username: un }
+      const ev = evBy.get(`${key}|${period}`) || null
+      const pe = evBy.get(`${key}|${prev}`) || null
       const done = ev && ev.status !== 'draft'
       const fin = done ? finalScore(ev) : null
       const reviewed = ev && (ev.status === 'reviewed' || ev.status === 'approved') && Number(ev.manager_total) > 0
-      const mgrName = managerOf.get(un)
+      const mgrName = na ? na.manager : managerOf.get(un)
       return {
+        key,
         username: un,
-        ho_va_ten: u.ho_va_ten || un,
+        noAccount: !!na,
+        // Tên lấy từ file Excel nếu có, sau đó tên hệ thống
+        ho_va_ten: ev?.employee_name || u.ho_va_ten || un,
         mien: u.mien || '',
         bu: u.bu || '',
         managerUsername: mgrName || '',
@@ -315,11 +343,11 @@ export default function TeamInsights() {
   )
   const trend = useMemo(() => {
     const evBy = new Map()
-    for (const e of evals) evBy.set(`${e.username}|${e.period}`, e)
+    for (const e of evals) evBy.set(`${personKey(e)}|${e.period}`, e)
     const rows = filtered.map((p) => ({
       ...p,
       cells: trendPeriods.map((tp) => {
-        const e = evBy.get(`${p.username}|${tp}`)
+        const e = evBy.get(`${p.key}|${tp}`)
         return e && e.status !== 'draft' ? { score: finalScore(e), id: e.id, status: e.status } : null
       }),
     }))
@@ -582,7 +610,7 @@ export default function TeamInsights() {
                   {gaps.slice(0, 15).map((g) => {
                     const w = (Math.abs(g.gap) / maxGap) * 50
                     return (
-                      <div key={g.username} className="flex items-center gap-2 text-xs" {...bindTip(`${g.ho_va_ten}: N ${g.self}% → N+1 ${g.mgr}% (${g.gap > 0 ? '+' : ''}${g.gap})`)}>
+                      <div key={g.key} className="flex items-center gap-2 text-xs" {...bindTip(`${g.ho_va_ten}: N ${g.self}% → N+1 ${g.mgr}% (${g.gap > 0 ? '+' : ''}${g.gap})`)}>
                         <span className="w-36 truncate text-slate-700">{g.ho_va_ten}</span>
                         <div className="relative h-3 flex-1">
                           <div className="absolute bottom-0 left-1/2 top-0 w-px bg-slate-300" />
@@ -679,7 +707,7 @@ export default function TeamInsights() {
                     ))}
                   </tr>
                   {trend.rows.map((r) => (
-                    <tr key={r.username}>
+                    <tr key={r.key}>
                       <td className="max-w-[12rem] truncate px-2 py-1 text-slate-700">{r.ho_va_ten}</td>
                       {r.cells.map((c, i) =>
                         c ? (
@@ -744,11 +772,11 @@ export default function TeamInsights() {
                   {tableRows.map((p) => {
                     const d = p.final !== null && p.prevFinal !== null ? round2(p.final - p.prevFinal) : null
                     return (
-                      <tr key={p.username} className="hover:bg-slate-50">
+                      <tr key={p.key} className="hover:bg-slate-50">
                         <td className="px-3 py-2">
                           <div className="font-medium text-slate-800">{p.ho_va_ten}</div>
                           <div className="text-xs text-slate-400">
-                            {p.username} · {p.objectives.length} mục tiêu
+                            {p.noAccount ? 'Không có tài khoản' : p.username} · {p.objectives.length} mục tiêu
                           </div>
                         </td>
                         <td className="px-3 py-2 text-slate-600">{[p.mien, p.bu].filter(Boolean).join(' · ') || '—'}</td>

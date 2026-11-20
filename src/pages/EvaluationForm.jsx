@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext'
 import {
   CATEGORIES,
   formatPeriod,
+  displayName,
   gradeOf,
   GRADE_COLORS,
   PASS_THRESHOLD,
@@ -56,13 +57,14 @@ export default function EvaluationForm() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
 
-  const isOwner = evaluation && evaluation.username === username
+  const isOwner = !!evaluation?.username && evaluation.username === username
   const status = evaluation?.status
   // Nhân viên chỉ sửa khi phiếu đang là nháp
   const canEditSelf = isOwner && status === 'draft'
   // Quản lý/admin chấm khi phiếu đã gửi (hoặc đã chấm, muốn sửa lại)
   // Chỉ quản lý TRỰC TIẾP (N+1) hoặc admin được chấm; quản lý cấp trên chỉ xem
-  const isDirectManager = !isOwner && (isAdmin || (isManager && ownerManager === username))
+  // Phiếu không tài khoản: N+1 = evaluations.manager_username (người nhập hộ)
+  const isDirectManager = !isOwner && (isAdmin || (!!ownerManager && ownerManager === username))
   const canReview = isDirectManager && (status === 'submitted' || status === 'reviewed')
   // Ý kiến N+1 lúc đăng ký: quản lý ghi được bất cứ lúc nào trước khi chốt
   const canCommentRegistration = isDirectManager && status !== 'approved'
@@ -84,7 +86,7 @@ export default function EvaluationForm() {
     setRegistrationComment(ev.registration_comment || '')
 
     const [{ data: ownerData }, { data: objs }, { data: ownerProfile }] = await Promise.all([
-      supabase.from('kpi_users').select('*').eq('username', ev.username).maybeSingle(),
+      supabase.from('kpi_users').select('*').eq('username', ev.username || '__none__').maybeSingle(),
       supabase
         .from('objectives')
         .select('*')
@@ -93,11 +95,11 @@ export default function EvaluationForm() {
       supabase
         .from('kpi_profiles')
         .select('manager_username')
-        .eq('username', ev.username)
+        .eq('username', ev.username || '__none__')
         .maybeSingle(),
     ])
     setOwner(ownerData)
-    setOwnerManager(ownerProfile?.manager_username || null)
+    setOwnerManager(ev.username ? ownerProfile?.manager_username || null : ev.manager_username)
 
     let loadedRows = objs || []
     // Khi quản lý mới vào chấm, mặc định lấy kết quả tự đánh giá làm điểm khởi đầu
@@ -268,7 +270,10 @@ export default function EvaluationForm() {
             Phiếu KPI — {formatPeriod(evaluation.period)}
           </h1>
           <p className="text-sm text-slate-500">
-            Nhân viên: <span className="font-medium">{owner?.ho_va_ten || evaluation.username}</span>
+            Nhân viên: <span className="font-medium">{displayName(evaluation, owner)}</span>
+            {!evaluation.username && (
+              <span className="ml-1 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-500">Không có tài khoản</span>
+            )}
             {owner?.mien ? ` · ${owner.mien}` : ''}
             {owner?.bu ? ` · ${owner.bu}` : ''}
           </p>
