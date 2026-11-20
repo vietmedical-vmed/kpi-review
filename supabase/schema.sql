@@ -3,7 +3,7 @@
 --
 --  Toàn bộ bảng riêng của app nằm trong schema app_kpi (đã tách khỏi public
 --  để tách bạch với các app khác trong cùng project). DÙNG CHUNG bảng
---  public.users sẵn có của DA project (login + khoá ngoại).
+--  shared.users sẵn có của DA project (login + khoá ngoại).
 --  Đăng nhập qua Edge Function (verify sha256) → cấp JWT có claim "username".
 --  Chạy toàn bộ file này trong Supabase: SQL Editor > New query
 --
@@ -28,13 +28,14 @@ begin
     from pg_constraint c
     join pg_class t on t.oid = c.conrelid
     where t.relname = 'users'
+      and t.relnamespace = 'shared'::regnamespace
       and c.contype in ('p', 'u')
       and c.conkey = array[
         (select attnum from pg_attribute
           where attrelid = t.oid and attname = 'username')
       ]
   ) then
-    alter table public.users
+    alter table shared.users
       add constraint users_username_key unique (username);
   end if;
 end $$;
@@ -43,8 +44,8 @@ end $$;
 -- Lưu quan hệ quản lý trực tiếp + quyền admin cho riêng phần KPI
 create table if not exists app_kpi.kpi_profiles (
   username          text primary key
-                    references public.users (username) on delete cascade,
-  manager_username  text references public.users (username) on delete set null,
+                    references shared.users (username) on delete cascade,
+  manager_username  text references shared.users (username) on delete set null,
   is_admin          boolean not null default false,
   created_at        timestamptz not null default now()
 );
@@ -60,7 +61,7 @@ create table if not exists app_kpi.kpi_periods (
 -- ---------- 3. BẢNG PHIẾU ĐÁNH GIÁ ----------
 create table if not exists app_kpi.evaluations (
   id              uuid primary key default gen_random_uuid(),
-  username        text not null references public.users (username) on delete cascade,
+  username        text not null references shared.users (username) on delete cascade,
   period          text not null references app_kpi.kpi_periods (period),
   status          text not null default 'draft'
                   check (status in ('draft', 'submitted', 'reviewed', 'approved')),
@@ -112,7 +113,7 @@ create index if not exists idx_kpi_profiles_mgr on app_kpi.kpi_profiles (manager
 -- View chạy quyền owner nên bỏ qua RLS (nếu có) trên bảng users.
 create or replace view app_kpi.kpi_users as
   select username, ho_va_ten, role as da_role, mien, bu
-  from public.users;
+  from shared.users;
 
 grant select on app_kpi.kpi_users to authenticated, anon;
 
@@ -138,6 +139,10 @@ as $$
   select exists (
     select 1 from app_kpi.kpi_profiles
     where username = public.current_username() and is_admin
+  ) or exists (
+    -- Admin của DA cũng là admin KPI
+    select 1 from shared.users
+    where username = public.current_username() and role = 'admin'
   );
 $$;
 
@@ -343,7 +348,7 @@ create policy obj_write on app_kpi.objectives
 -- =============================================================
 -- Tạo hồ sơ KPI cho toàn bộ user hiện có của DA
 insert into app_kpi.kpi_profiles (username)
-select username from public.users
+select username from shared.users
 on conflict (username) do nothing;
 
 -- Mở kỳ tháng hiện tại (các kỳ sau tự tạo qua trigger)

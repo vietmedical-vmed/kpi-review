@@ -36,7 +36,8 @@ export function AuthProvider({ children }) {
           .eq('manager_username', uname),
       ])
 
-    const isAdmin = !!kp?.is_admin
+    // Admin KPI: bật cờ trong kpi_profiles HOẶC là admin của DA (khớp kpi_is_admin() ở DB)
+    const isAdmin = !!kp?.is_admin || userRow?.da_role === 'admin'
     const isManager = isAdmin || (reportsCount || 0) > 0
     setProfile({
       username: uname,
