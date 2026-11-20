@@ -18,6 +18,7 @@ import {
 } from '../lib/constants'
 import { buildTeamSummary, downloadBlob } from '../lib/excel'
 import Spinner from '../components/Spinner'
+import { loadPeriods } from '../lib/periods'
 
 const TREND_MONTHS = 6
 
@@ -94,8 +95,8 @@ export default function TeamInsights() {
   // ---------- tải danh mục người + kỳ
   useEffect(() => {
     ;(async () => {
-      const [{ data: ps }, { data: kp }, { data: us }] = await Promise.all([
-        supabase.from('kpi_periods').select('*').order('period', { ascending: false }),
+      const [ps, { data: kp }, { data: us }] = await Promise.all([
+        loadPeriods(12),
         supabase.from('kpi_profiles').select('username, manager_username'),
         supabase.from('kpi_users').select('username, ho_va_ten, mien, bu').order('ho_va_ten'),
       ])

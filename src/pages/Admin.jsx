@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { formatPeriod, recentPeriods } from '../lib/constants'
+import { formatPeriod } from '../lib/constants'
+import { loadPeriods } from '../lib/periods'
 import Spinner from '../components/Spinner'
 
 export default function Admin() {
@@ -519,16 +520,11 @@ function OrgTab() {
 function PeriodsTab() {
   const [periods, setPeriods] = useState([])
   const [loading, setLoading] = useState(true)
-  const [newPeriod, setNewPeriod] = useState('')
   const [message, setMessage] = useState('')
 
   async function load() {
     setLoading(true)
-    const { data } = await supabase
-      .from('kpi_periods')
-      .select('*')
-      .order('period', { ascending: false })
-    setPeriods(data || [])
+    setPeriods(await loadPeriods(12))
     setLoading(false)
   }
 
@@ -536,67 +532,29 @@ function PeriodsTab() {
     load()
   }, [])
 
-  async function addPeriod() {
-    if (!newPeriod) return
+  // Kỳ tự tạo chưa có dòng trong DB -> upsert để lưu trạng thái khoá/mở
+  async function toggleOpen(p) {
     setMessage('')
     const { error } = await supabase
       .from('kpi_periods')
-      .insert({ period: newPeriod, is_open: true })
+      .upsert({ period: p.period, is_open: !p.is_open, note: p.note || 'Admin cập nhật' }, { onConflict: 'period' })
     if (error) setMessage('Lỗi: ' + error.message)
-    else {
-      setNewPeriod('')
-      load()
-    }
-  }
-
-  async function toggleOpen(p) {
-    const { error } = await supabase
-      .from('kpi_periods')
-      .update({ is_open: !p.is_open })
-      .eq('period', p.period)
-    if (!error)
+    else
       setPeriods((prev) =>
-        prev.map((x) => (x.period === p.period ? { ...x, is_open: !x.is_open } : x))
+        prev.map((x) => (x.period === p.period ? { ...x, is_open: !x.is_open, auto: false } : x))
       )
   }
 
   if (loading) return <Spinner />
 
-  const existing = new Set(periods.map((p) => p.period))
-  const suggestions = recentPeriods(12).filter((p) => !existing.has(p))
-
   return (
     <div>
-      <div className="mb-4 flex items-end gap-2">
-        <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600">
-            Thêm kỳ mới
-          </label>
-          <select
-            value={newPeriod}
-            onChange={(e) => setNewPeriod(e.target.value)}
-            className="rounded-md border border-slate-300 px-3 py-2 text-sm"
-          >
-            <option value="">Chọn tháng...</option>
-            {suggestions.map((p) => (
-              <option key={p} value={p}>
-                {formatPeriod(p)}
-              </option>
-            ))}
-          </select>
-        </div>
-        <button
-          onClick={addPeriod}
-          disabled={!newPeriod}
-          className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
-        >
-          + Thêm kỳ
-        </button>
+      <div className="mb-4 rounded-md bg-blue-50 px-4 py-3 text-sm text-blue-800">
+        Kỳ đánh giá được <b>tạo tự động theo tháng</b> — nhân viên tạo phiếu hoặc nhập Excel là kỳ tự có, không cần
+        thêm tay. Admin chỉ cần <b>khoá kỳ</b> khi muốn chốt (kỳ đã khoá: nhân viên/quản lý không tạo phiếu mới).
       </div>
       {message && (
-        <div className="mb-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
-          {message}
-        </div>
+        <div className="mb-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{message}</div>
       )}
       <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
         <table className="w-full text-sm">
@@ -604,25 +562,25 @@ function PeriodsTab() {
             <tr>
               <th className="px-4 py-3 font-medium">Kỳ</th>
               <th className="px-4 py-3 font-medium">Trạng thái</th>
+              <th className="px-4 py-3 font-medium">Ghi chú</th>
               <th className="px-4 py-3"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {periods.map((p) => (
               <tr key={p.period}>
-                <td className="px-4 py-3 font-medium text-slate-800">
-                  {formatPeriod(p.period)}
-                </td>
+                <td className="px-4 py-3 font-medium text-slate-800">{formatPeriod(p.period)}</td>
                 <td className="px-4 py-3">
                   <span
                     className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                      p.is_open
-                        ? 'bg-green-100 text-green-800'
-                        : 'bg-slate-100 text-slate-600'
+                      p.is_open ? 'bg-green-100 text-green-800' : 'bg-slate-100 text-slate-600'
                     }`}
                   >
                     {p.is_open ? 'Đang mở' : 'Đã khoá'}
                   </span>
+                </td>
+                <td className="px-4 py-3 text-xs text-slate-500">
+                  {p.auto ? 'Chưa phát sinh phiếu' : p.note || ''}
                 </td>
                 <td className="px-4 py-3 text-right">
                   <button

@@ -237,15 +237,49 @@ create policy eval_select on app_kpi.evaluations
     or (select kpi_is_admin())
   );
 
+-- Kỳ đánh giá TỰ TẠO: trigger thêm dòng kpi_periods khi tạo phiếu đầu tiên của kỳ
+-- (định dạng YYYY-MM, trong khoảng 24 tháng trước .. tháng sau). Khớp src/lib/periods.js.
+create or replace function app_kpi.kpi_autocreate_period()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  cur  date := date_trunc('month', (now() at time zone 'Asia/Ho_Chi_Minh'))::date;
+  per  date;
+begin
+  if new.period is null or new.period !~ '^\d{4}-(0[1-9]|1[0-2])$' then
+    raise exception 'Kỳ đánh giá không hợp lệ: "%" (định dạng YYYY-MM)', new.period;
+  end if;
+  per := to_date(new.period || '-01', 'YYYY-MM-DD');
+  if per > cur + interval '1 month' or per < cur - interval '24 months' then
+    raise exception 'Kỳ % nằm ngoài khoảng cho phép (24 tháng trước đến tháng sau)', new.period;
+  end if;
+  insert into app_kpi.kpi_periods (period, is_open, note)
+  values (new.period, true, 'Tự tạo')
+  on conflict (period) do nothing;
+  return new;
+end;
+$$;
+
+revoke all on function app_kpi.kpi_autocreate_period() from public, anon, authenticated;
+
+drop trigger if exists trg_eval_autoperiod on app_kpi.evaluations;
+create trigger trg_eval_autoperiod
+  before insert on app_kpi.evaluations
+  for each row execute function app_kpi.kpi_autocreate_period();
+
 -- Tạo phiếu: cho chính mình, hoặc quản lý tạo cho cấp dưới (nhập Excel hàng loạt),
--- với điều kiện kỳ đang mở. Admin tạo được mọi trường hợp.
+-- với điều kiện kỳ KHÔNG bị khoá (kỳ chưa có dòng = đang mở, trigger trên tự tạo).
+-- Admin tạo được mọi trường hợp.
 drop policy if exists eval_insert on app_kpi.evaluations;
 create policy eval_insert on app_kpi.evaluations
   for insert to authenticated with check (
-    ((username = current_username() or kpi_is_manager_of(username))
-      and exists (select 1 from app_kpi.kpi_periods p
-                  where p.period = evaluations.period and p.is_open))
-    or kpi_is_admin()
+    ((username = (select current_username()) or kpi_is_manager_of(username))
+      and not exists (select 1 from app_kpi.kpi_periods p
+                      where p.period = evaluations.period and not p.is_open))
+    or (select kpi_is_admin())
   );
 
 drop policy if exists eval_update on app_kpi.evaluations;
@@ -312,9 +346,9 @@ insert into app_kpi.kpi_profiles (username)
 select username from public.users
 on conflict (username) do nothing;
 
--- Mở kỳ tháng hiện tại
+-- Mở kỳ tháng hiện tại (các kỳ sau tự tạo qua trigger)
 insert into app_kpi.kpi_periods (period, is_open, note)
-values (to_char(now(), 'YYYY-MM'), true, 'Kỳ khởi tạo')
+values (to_char(now() at time zone 'Asia/Ho_Chi_Minh', 'YYYY-MM'), true, 'Tự tạo')
 on conflict (period) do nothing;
 
 -- ĐẶT ADMIN ĐẦU TIÊN: thay 'ten_dang_nhap_cua_ban' bằng username của bạn

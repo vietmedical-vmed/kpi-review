@@ -7,6 +7,9 @@
 //                            TÀI LIỆU THAM CHIẾU | KQ CỦA N | HỆ SỐ N | KQ CỦA N+1 | HỆ SỐ N+1
 //                            + KẾT QUẢ CỦA N / N+1, ĐÁNH GIÁ CỦA N+1, KẾT QUẢ CUỐI CÙNG, XẾP LOẠI
 // Tên file: "<Họ và tên>_ Đăng kí & đánh giá KPI tháng_<YYYY-MM>.xlsx"
+// Dòng 4 sheet Đăng ký: ô "NHÂN VIÊN" (dropdown "Họ tên (username)") + ô "KỲ ĐÁNH GIÁ".
+// Khi đọc, ô trong file được ưu tiên hơn tên file (leader upload hộ cả đội,
+// tên file có thể tuỳ ý).
 //
 // Parser đọc theo TIÊU ĐỀ CỘT (không phụ thuộc vị trí cố định), nhận số dạng
 // tỷ lệ (0.9 / ô định dạng %) lẫn dạng số (90) và quy về thang 0–100.
@@ -87,6 +90,15 @@ function cleanComment(s) {
 }
 
 // ================================================================ TÊN FILE
+export function parsePeriodText(text) {
+  const s = String(text || '')
+  let m = s.match(/(20\d{2})\s*[-_./]\s*(0?[1-9]|1[0-2])(?!\d)/)
+  if (m) return `${m[1]}-${String(m[2]).padStart(2, '0')}`
+  m = s.match(/(?<!\d)(0?[1-9]|1[0-2])\s*[-_./]\s*(20\d{2})/) // "10/2026", "Tháng 10/2026"
+  if (m) return `${m[2]}-${String(m[1]).padStart(2, '0')}`
+  return null
+}
+
 export function parseFileName(fileName) {
   const base = String(fileName || '')
     .replace(/\.[^.]+$/, '')
@@ -188,6 +200,45 @@ function readSheet(ws) {
   return { headerFound: true, cols, rows, comments }
 }
 
+// Đọc ô nhận diện ở các dòng đầu: "NHÂN VIÊN" | <giá trị>, "KỲ ĐÁNH GIÁ" | <giá trị>.
+// Cũng hiểu dạng 1 ô gộp "Nhân viên: X · Kỳ: Tháng 10/2026" (file tải từ bản cũ).
+function readIdentity(ws) {
+  const out = { person: '', period: null }
+  if (!ws) return out
+  for (let r = 1; r <= Math.min(6, ws.rowCount); r++) {
+    const row = ws.getRow(r)
+    const lastCol = Math.max(row.cellCount, 6)
+    for (let c = 1; c <= lastCol; c++) {
+      const cell = row.getCell(c)
+      if (cell.isMerged && cell.master.address !== cell.address) continue
+      const text = cellText(cell)
+      if (!text) continue
+      const norm = normalizeName(text)
+      const isPerson = /^(nhan vien|ho va ten|ho ten|ma nv)/.test(norm)
+      const isPeriod = /^(ky danh gia|ky\b)/.test(norm)
+      if (!isPerson && !isPeriod) continue
+      // Dạng "Nhân viên: X · Kỳ: Y" trong cùng 1 ô
+      const inline = text.match(/nh[âa]n vi[êe]n\s*:\s*([^·|\n]+)/i)
+      if (inline && inline[1].trim()) out.person ||= inline[1].trim()
+      const inlineP = text.match(/k[ỳy][^:]*:\s*(.+)$/i)
+      if (inlineP) out.period ||= parsePeriodText(inlineP[1])
+      if (text.includes(':') && (inline || inlineP)) continue
+      // Dạng nhãn | giá trị: lấy ô có dữ liệu kế tiếp bên phải
+      for (let k = c + 1; k <= lastCol; k++) {
+        const vc = row.getCell(k)
+        if (vc.isMerged && vc.master.address === cell.address) continue
+        const v = cellText(vc)
+        if (!v) continue
+        if (PLACEHOLDER.test(v) || /^\[.*\]$/.test(v)) break
+        if (isPerson) out.person ||= v
+        else out.period ||= parsePeriodText(v)
+        break
+      }
+    }
+  }
+  return out
+}
+
 function mapCategory(name) {
   const n = normalizeName(name)
   const hit = CATEGORIES.find((c) => normalizeName(c) === n)
@@ -212,14 +263,24 @@ export async function parseStandardFile(file) {
     }
   }
 
-  const { personName, period } = parseFileName(file.name)
-  const reg = readSheet(findSheet(wb, SHEET_REG))
-  const ev = readSheet(findSheet(wb, SHEET_EVAL))
+  const { personName, period: filePeriod } = parseFileName(file.name)
+  const regWs = findSheet(wb, SHEET_REG)
+  const evWs = findSheet(wb, SHEET_EVAL)
+  const reg = readSheet(regWs)
+  const ev = readSheet(evWs)
+  const idReg = readIdentity(regWs)
+  const idEv = readIdentity(evWs)
+  const identity = {
+    person: idReg.person || idEv.person || '',
+    period: idReg.period || idEv.period || null,
+  }
+  const period = identity.period || filePeriod
 
   if (!reg?.headerFound && !ev?.headerFound) {
     return {
       fileName: file.name,
       personName,
+      identity,
       period,
       fatal: `Không thấy sheet "${SHEET_REG}" hoặc "${SHEET_EVAL}" đúng mẫu (thiếu dòng tiêu đề STT / TÊN MỤC TIÊU).`,
     }
@@ -280,6 +341,7 @@ export async function parseStandardFile(file) {
     fatal: null,
     fileName: file.name,
     personName,
+    identity,
     period,
     source,
     objectives,
@@ -399,8 +461,15 @@ const frac = (v) => (v === null || v === undefined || v === '' ? null : round2(v
  * Tạo file mẫu chuẩn cho 1 người, điền sẵn dữ liệu nếu có.
  * objectives: [{ name, target, measure_method, weight, reference_doc, self_result, manager_result }]
  */
+export function personLabel(u) {
+  if (!u) return ''
+  return u.ho_va_ten ? `${u.ho_va_ten} (${u.username})` : u.username
+}
+
 export async function buildStandardWorkbook({
   personName,
+  username = '',
+  people = [], // [{ username, ho_va_ten }] — nguồn dropdown chọn nhân viên
   period,
   objectives = [],
   registrationComment = '',
@@ -424,9 +493,38 @@ export async function buildStandardWorkbook({
   styleTitle(r1, 1, 5, 'PHIẾU ĐĂNG KÝ KPI ĐẦU THÁNG')
   styleNote(r1, 2, 5, 'Hướng dẫn: Nhập thông tin mục tiêu, trọng số tại các ô nền vàng. Các ô nền xanh được tính tự động.')
   styleNote(r1, 3, 5, 'Lưu ý: Tổng trọng số các mục tiêu cần bằng 100%, nhập theo tỷ lệ từ 0% đến 100%.')
-  r1.mergeCells(4, 1, 4, 5)
-  r1.getCell(4, 1).value = `Nhân viên: ${personName || ''}   ·   Kỳ: ${formatPeriod(period)}`
-  r1.getCell(4, 1).font = { bold: true, color: { argb: C.calcInk } }
+  // Dòng nhận diện: NHÂN VIÊN | <Họ tên (username)> | KỲ ĐÁNH GIÁ | <YYYY-MM>
+  r1.mergeCells(4, 1, 4, 2)
+  r1.getCell(4, 1).value = 'NHÂN VIÊN'
+  styleLabel(r1.getCell(4, 1))
+  r1.getCell(4, 1).font = { bold: true, color: { argb: C.ink } }
+  const who = r1.getCell(4, 3)
+  who.value = username ? personLabel({ username, ho_va_ten: personName }) : '[Chọn nhân viên]'
+  styleInput(who)
+  who.font = { bold: true, color: { argb: C.ink } }
+  r1.getCell(4, 4).value = 'KỲ ĐÁNH GIÁ'
+  styleLabel(r1.getCell(4, 4))
+  r1.getCell(4, 4).font = { bold: true, color: { argb: C.ink } }
+  const per = r1.getCell(4, 5)
+  per.value = period
+  per.numFmt = '@'
+  styleInput(per)
+  per.font = { bold: true, color: { argb: C.ink } }
+  r1.getRow(4).height = 20
+  if (people.length) {
+    const ref = wb.addWorksheet('_DanhSach')
+    people.forEach((u, i) => (ref.getCell(i + 1, 1).value = personLabel(u)))
+    ref.state = 'veryHidden'
+    who.dataValidation = {
+      type: 'list',
+      allowBlank: false,
+      formulae: [`=_DanhSach!$A$1:$A$${people.length}`],
+      showErrorMessage: true,
+      errorStyle: 'warning',
+      errorTitle: 'Nhân viên',
+      error: 'Chọn nhân viên từ danh sách xổ xuống.',
+    }
+  }
   ;['STT', 'TÊN MỤC TIÊU', 'CÁCH THỨC ĐO', 'TRỌNG SỐ', 'MỤC TIÊU CẦN ĐẠT'].forEach((h, i) =>
     styleHeader(r1.getCell(5, i + 1), h)
   )

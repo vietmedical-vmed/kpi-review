@@ -15,6 +15,7 @@ import {
   parseStandardFile,
   standardFileName,
 } from '../lib/excel'
+import { defaultPeriod, isPeriodAllowed, loadPeriods } from '../lib/periods'
 import Spinner from '../components/Spinner'
 
 let fileSeq = 0
@@ -56,12 +57,9 @@ export default function ExcelImport() {
 
   useEffect(() => {
     async function init() {
-      const [{ data: ps }, users] = await Promise.all([
-        supabase.from('kpi_periods').select('*').order('period', { ascending: false }),
-        loadScopeUsers(),
-      ])
-      setPeriods(ps || [])
-      setPeriod((ps || []).find((p) => p.is_open)?.period || ps?.[0]?.period || '')
+      const [ps, users] = await Promise.all([loadPeriods(), loadScopeUsers()])
+      setPeriods(ps)
+      setPeriod(defaultPeriod(ps))
       setScopeUsers(users)
       setDownloadUser(username)
       setLoading(false)
@@ -79,6 +77,50 @@ export default function ExcelImport() {
     return m
   }, [scopeUsers])
   const userMap = useMemo(() => new Map(scopeUsers.map((u) => [u.username, u])), [scopeUsers])
+
+  /**
+   * Xác định file thuộc nhân viên nào (leader có thể upload hộ cả đội, tên file tuỳ ý):
+   *  1. Ô "NHÂN VIÊN" trong file — "Họ tên (username)" hoặc họ tên
+   *  2. Tên file CHỨA đầy đủ họ tên / username của đúng 1 người trong phạm vi
+   *  3. Phạm vi chỉ có 1 người
+   * Không chắc chắn -> để trống cho người dùng chọn.
+   */
+  function resolvePerson(parsed) {
+    const idText = (parsed.identity?.person || '').trim()
+    if (idText) {
+      const m = idText.match(/\(([^()]+)\)\s*$/)
+      const un = m?.[1]?.trim().toLowerCase()
+      const byUn = un && scopeUsers.find((u) => u.username.toLowerCase() === un)
+      if (byUn) return { username: byUn.username, by: 'file' }
+      const byName = userByName.get(normalizeName(idText.replace(/\([^()]*\)\s*$/, '')))
+      if (byName) return { username: byName.username, by: 'file' }
+      return {
+        username: '',
+        by: null,
+        note: `Ô NHÂN VIÊN trong file ghi "${idText}" — không khớp ai trong phạm vi của bạn.`,
+      }
+    }
+    const base = String(parsed.fileName || '').replace(/\.[^.]+$/, '')
+    const fn = ` ${normalizeName(base.replace(/[_\-.,()]+/g, ' '))} `
+    const tokens = new Set(base.toLowerCase().split(/[\s_\-,()]+/).filter(Boolean))
+    let hits = scopeUsers.filter(
+      (u) =>
+        (u.ho_va_ten && fn.includes(` ${normalizeName(u.ho_va_ten)} `)) ||
+        tokens.has(u.username.toLowerCase())
+    )
+    if (hits.length > 1) {
+      // Ưu tiên tên dài nhất (vd "Nguyễn Văn An" thắng "Văn An")
+      const len = (u) => normalizeName(u.ho_va_ten).length
+      const max = Math.max(...hits.map(len))
+      const top = hits.filter((u) => len(u) === max)
+      if (top.length === 1) hits = top
+    }
+    if (hits.length === 1) return { username: hits[0].username, by: 'filename' }
+    if (hits.length > 1)
+      return { username: '', by: null, note: `Tên file khớp nhiều người (${hits.map((u) => u.ho_va_ten).join(', ')}).` }
+    if (scopeUsers.length === 1) return { username: scopeUsers[0].username, by: 'single' }
+    return { username: '', by: null }
+  }
   const periodMap = useMemo(() => new Map(periods.map((p) => [p.period, p])), [periods])
 
   // ------------------------------------------------- TẢI MẪU CHUẨN
@@ -101,6 +143,8 @@ export default function ExcelImport() {
     }
     const blob = await buildStandardWorkbook({
       personName: u?.ho_va_ten || uname,
+      username: uname,
+      people: scopeUsers,
       period,
       objectives,
       registrationComment: ev?.registration_comment || '',
@@ -145,15 +189,14 @@ export default function ExcelImport() {
       const parsedList = []
       for (const f of files) {
         const parsed = await parseStandardFile(f)
-        const matched = userByName.get(normalizeName(parsed.personName))
-        // Chỉ 1 người trong phạm vi -> mặc định là người đó
-        const fallback = scopeUsers.length === 1 ? scopeUsers[0] : null
-        const uname = matched?.username || fallback?.username || ''
+        const who = resolvePerson(parsed)
+        const uname = who.username
         parsedList.push({
           id: ++fileSeq,
           parsed,
           username: uname,
-          matchedByName: !!matched,
+          matchedBy: who.by,
+          matchNote: who.note || '',
           period: parsed.period || period,
           targetStatus: parsed.fatal ? 'draft' : defaultStatus(parsed, uname),
         })
@@ -210,8 +253,12 @@ export default function ExcelImport() {
       prev.map((it) => {
         if (it.id !== id) return it
         const next = { ...it, ...changes }
-        if (changes.username !== undefined && !it.parsed.fatal)
-          next.targetStatus = defaultStatus(it.parsed, changes.username)
+        if (changes.username !== undefined) {
+          next.matchedBy = changes.username ? 'manual' : null
+          next.matchNote = ''
+          next.statusTouched = false
+          if (!it.parsed.fatal) next.targetStatus = defaultStatus(it.parsed, changes.username)
+        }
         return next
       })
     )
@@ -222,12 +269,15 @@ export default function ExcelImport() {
     const out = []
     if (it.parsed.fatal) return [it.parsed.fatal]
     out.push(...it.parsed.errors)
-    if (!it.username) out.push(`Chưa xác định nhân viên — tên file "${it.parsed.personName}" không khớp ai trong phạm vi của bạn. Hãy chọn nhân viên.`)
+    if (!it.username)
+      out.push(
+        `${it.matchNote ? it.matchNote + ' ' : 'Chưa xác định được nhân viên (ô NHÂN VIÊN trong file trống, tên file không chứa tên ai trong phạm vi). '}Hãy chọn nhân viên.`
+      )
     if (!it.period) out.push('Chưa xác định kỳ đánh giá.')
+    else if (!isPeriodAllowed(it.period)) out.push(`Kỳ ${formatPeriod(it.period)} nằm ngoài khoảng cho phép.`)
     else {
       const p = periodMap.get(it.period)
-      if (!p) out.push(`Kỳ ${formatPeriod(it.period)} chưa được tạo — nhờ admin tạo trong Quản trị › Kỳ đánh giá.`)
-      else if (!p.is_open && !isAdmin) out.push(`Kỳ ${formatPeriod(it.period)} đang khoá.`)
+      if (p && !p.is_open && !isAdmin) out.push(`Kỳ ${formatPeriod(it.period)} đã bị khoá.`)
     }
     const dup = items.filter((x) => x.username && x.username === it.username && x.period === it.period)
     if (it.username && dup.length > 1 && dup[0].id !== it.id) out.push('Trùng nhân viên & kỳ với file khác phía trên.')
@@ -358,9 +408,9 @@ export default function ExcelImport() {
       <section className="mb-4 rounded-xl border border-slate-200 bg-white p-5">
         <h2 className="mb-1 font-semibold text-slate-800">1. Tải mẫu chuẩn</h2>
         <p className="mb-3 text-sm text-slate-500">
-          File được điền sẵn dữ liệu đã có trên hệ thống (nếu có). Tên file theo dạng{' '}
-          <code className="rounded bg-slate-100 px-1 text-xs">Họ tên_ Đăng kí & đánh giá KPI tháng_YYYY-MM.xlsx</code>{' '}
-          — giữ nguyên tên để hệ thống tự nhận người & kỳ khi upload.
+          File được điền sẵn dữ liệu đã có trên hệ thống (nếu có). Dòng 4 sheet "Đăng ký đầu tháng" có ô{' '}
+          <b>NHÂN VIÊN</b> (chọn từ danh sách) và <b>KỲ ĐÁNH GIÁ</b> — hệ thống dựa vào 2 ô này để biết file của ai,
+          nên leader có thể gom file cả đội (đặt tên file tuỳ ý) rồi upload một lần.
         </p>
         <div className="flex flex-wrap items-end gap-3">
           <Field label="Kỳ đánh giá">
@@ -527,6 +577,18 @@ function Field({ label, children }) {
   )
 }
 
+const MATCH_HINTS = {
+  file: ['Theo ô NHÂN VIÊN trong file', 'text-green-700'],
+  filename: ['Theo tên file — kiểm tra lại', 'text-amber-700'],
+  single: ['Mặc định (chỉ 1 người) — kiểm tra lại', 'text-amber-700'],
+  manual: ['Đã chọn tay', 'text-slate-500'],
+}
+function MatchHint({ by }) {
+  if (!by) return null
+  const [text, cls] = MATCH_HINTS[by]
+  return <div className={`mt-0.5 text-xs ${cls}`}>{text}</div>
+}
+
 function pct(v) {
   return v === null || v === undefined ? '—' : `${v}%`
 }
@@ -561,14 +623,12 @@ function FileRows({ it, p, errs, ev, open, scopeUsers, periods, allowed, onToggl
               </option>
             ))}
           </select>
-          {it.username && !it.matchedByName && (
-            <div className="mt-0.5 text-xs text-amber-700">Tự chọn — kiểm tra lại</div>
-          )}
+          <MatchHint by={it.matchedBy} />
         </td>
         <td className="px-3 py-2">
           <select value={it.period} onChange={(e) => onChange({ period: e.target.value })} className="input">
             {!periods.some((x) => x.period === it.period) && it.period && (
-              <option value={it.period}>{formatPeriod(it.period)} (chưa tạo)</option>
+              <option value={it.period}>{formatPeriod(it.period)}</option>
             )}
             {periods.map((x) => (
               <option key={x.period} value={x.period}>

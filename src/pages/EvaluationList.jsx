@@ -8,6 +8,7 @@ import {
   STATUS_COLORS,
 } from '../lib/constants'
 import Spinner from '../components/Spinner'
+import { defaultPeriod, loadPeriods } from '../lib/periods'
 
 export default function EvaluationList() {
   const { username } = useAuth()
@@ -21,21 +22,18 @@ export default function EvaluationList() {
 
   async function load() {
     setLoading(true)
-    const [{ data: evals }, { data: periods }] = await Promise.all([
+    const [{ data: evals }, all] = await Promise.all([
       supabase
         .from('evaluations')
         .select('*')
         .eq('username', username)
         .order('period', { ascending: false }),
-      supabase
-        .from('kpi_periods')
-        .select('*')
-        .eq('is_open', true)
-        .order('period', { ascending: false }),
+      loadPeriods(3),
     ])
+    const open = all.filter((p) => p.is_open)
     setEvaluations(evals || [])
-    setOpenPeriods(periods || [])
-    setSelectedPeriod(periods?.[0]?.period || '')
+    setOpenPeriods(open)
+    setSelectedPeriod(defaultPeriod(open))
     setLoading(false)
   }
 
