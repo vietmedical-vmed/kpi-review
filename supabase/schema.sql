@@ -66,7 +66,16 @@ create table if not exists app_kpi.evaluations (
                   check (status in ('draft', 'submitted', 'reviewed', 'approved')),
   self_total      numeric(6, 2) not null default 0,
   manager_total   numeric(6, 2) not null default 0,
-  manager_comment text,
+  manager_comment text,                    -- "ĐÁNH GIÁ CỦA N+1"
+  registration_comment text,               -- "Ý KIẾN CỦA N+1" lúc đăng ký đầu tháng
+  source_file     text,                    -- file Excel nhập gần nhất
+  imported_at     timestamptz,
+  imported_by     text,
+  -- KẾT QUẢ CUỐI CÙNG theo mẫu chuẩn: IF(KQ N+1 = 0, KQ N, KQ N+1)
+  final_total     numeric(6, 2) generated always as (
+                    case when coalesce(manager_total, 0) = 0 then self_total
+                         else manager_total end
+                  ) stored,
   submitted_at    timestamptz,
   reviewed_at     timestamptz,
   approved_at     timestamptz,
@@ -145,6 +154,32 @@ as $$
   );
 $$;
 
+-- Quản lý trực tiếp HOẶC gián tiếp (mọi cấp) của target — chỉ dùng cho quyền XEM
+create or replace function public.kpi_is_above(target text)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  with recursive chain as (
+    select p.manager_username, 1 as depth
+    from app_kpi.kpi_profiles p
+    where p.username = target
+    union all
+    select p.manager_username, c.depth + 1
+    from chain c
+    join app_kpi.kpi_profiles p on p.username = c.manager_username
+    where c.manager_username is not null and c.depth < 15
+  )
+  select exists (
+    select 1 from chain
+    where manager_username = public.current_username()
+  );
+$$;
+
+grant execute on function public.kpi_is_above(text) to authenticated;
+
 -- Tự cập nhật updated_at
 create or replace function public.touch_updated_at()
 returns trigger language plpgsql as $$
@@ -193,11 +228,13 @@ create policy periods_admin_all on app_kpi.kpi_periods
 
 -- ---------- RLS: evaluations ----------
 drop policy if exists eval_select on app_kpi.evaluations;
+-- Xem: bản thân, quản lý mọi cấp phía trên (skip-level), admin.
+-- Sửa/chấm vẫn chỉ quản lý TRỰC TIẾP (eval_update bên dưới).
 create policy eval_select on app_kpi.evaluations
   for select to authenticated using (
-    username = current_username()
-    or kpi_is_manager_of(username)
-    or kpi_is_admin()
+    username = (select current_username())
+    or kpi_is_above(username)
+    or (select kpi_is_admin())
   );
 
 -- Tạo phiếu: cho chính mình, hoặc quản lý tạo cho cấp dưới (nhập Excel hàng loạt),
@@ -239,9 +276,9 @@ create policy obj_select on app_kpi.objectives
     exists (
       select 1 from app_kpi.evaluations e
       where e.id = objectives.evaluation_id
-        and (e.username = current_username()
-             or kpi_is_manager_of(e.username)
-             or kpi_is_admin())
+        and (e.username = (select current_username())
+             or kpi_is_above(e.username)
+             or (select kpi_is_admin()))
     )
   );
 

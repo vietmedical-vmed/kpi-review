@@ -7,6 +7,7 @@ import EvaluationList from './pages/EvaluationList'
 import EvaluationForm from './pages/EvaluationForm'
 import ManagerReview from './pages/ManagerReview'
 import ExcelImport from './pages/ExcelImport'
+import TeamInsights from './pages/TeamInsights'
 import Admin from './pages/Admin'
 
 export default function App() {
@@ -29,6 +30,14 @@ export default function App() {
           element={
             <ProtectedRoute requireManager>
               <ManagerReview />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/bao-cao"
+          element={
+            <ProtectedRoute requireManager>
+              <TeamInsights />
             </ProtectedRoute>
           }
         />

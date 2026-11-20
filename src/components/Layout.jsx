@@ -78,6 +78,7 @@ export default function Layout() {
             <NavLink to="/danh-gia" className={navClass}>Phiếu của tôi</NavLink>
             <NavLink to="/excel" className={navClass}>Nhập Excel</NavLink>
             {isManager && <NavLink to="/duyet" className={navClass}>Duyệt KPI</NavLink>}
+            {isManager && <NavLink to="/bao-cao" className={navClass}>Báo cáo quản lý</NavLink>}
             {isAdmin && <NavLink to="/quan-tri" className={navClass}>Quản trị</NavLink>}
           </nav>
         </div>

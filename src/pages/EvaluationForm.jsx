@@ -5,6 +5,9 @@ import { useAuth } from '../context/AuthContext'
 import {
   CATEGORIES,
   formatPeriod,
+  gradeOf,
+  GRADE_COLORS,
+  PASS_THRESHOLD,
   STATUS_LABELS,
   STATUS_COLORS,
 } from '../lib/constants'
@@ -43,9 +46,11 @@ export default function EvaluationForm() {
 
   const [evaluation, setEvaluation] = useState(null)
   const [owner, setOwner] = useState(null)
+  const [ownerManager, setOwnerManager] = useState(null)
   const [rows, setRows] = useState([])
   const [removedIds, setRemovedIds] = useState([])
   const [managerComment, setManagerComment] = useState('')
+  const [registrationComment, setRegistrationComment] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('')
@@ -56,8 +61,11 @@ export default function EvaluationForm() {
   // Nhân viên chỉ sửa khi phiếu đang là nháp
   const canEditSelf = isOwner && status === 'draft'
   // Quản lý/admin chấm khi phiếu đã gửi (hoặc đã chấm, muốn sửa lại)
-  const canReview =
-    !isOwner && (isManager || isAdmin) && (status === 'submitted' || status === 'reviewed')
+  // Chỉ quản lý TRỰC TIẾP (N+1) hoặc admin được chấm; quản lý cấp trên chỉ xem
+  const isDirectManager = !isOwner && (isAdmin || (isManager && ownerManager === username))
+  const canReview = isDirectManager && (status === 'submitted' || status === 'reviewed')
+  // Ý kiến N+1 lúc đăng ký: quản lý ghi được bất cứ lúc nào trước khi chốt
+  const canCommentRegistration = isDirectManager && status !== 'approved'
 
   async function load() {
     setLoading(true)
@@ -73,16 +81,23 @@ export default function EvaluationForm() {
     }
     setEvaluation(ev)
     setManagerComment(ev.manager_comment || '')
+    setRegistrationComment(ev.registration_comment || '')
 
-    const [{ data: ownerData }, { data: objs }] = await Promise.all([
+    const [{ data: ownerData }, { data: objs }, { data: ownerProfile }] = await Promise.all([
       supabase.from('kpi_users').select('*').eq('username', ev.username).maybeSingle(),
       supabase
         .from('objectives')
         .select('*')
         .eq('evaluation_id', id)
         .order('position', { ascending: true }),
+      supabase
+        .from('kpi_profiles')
+        .select('manager_username')
+        .eq('username', ev.username)
+        .maybeSingle(),
     ])
     setOwner(ownerData)
+    setOwnerManager(ownerProfile?.manager_username || null)
 
     let loadedRows = objs || []
     // Khi quản lý mới vào chấm, mặc định lấy kết quả tự đánh giá làm điểm khởi đầu
@@ -115,6 +130,24 @@ export default function EvaluationForm() {
       managerTotal: Math.round(managerTotal * 100) / 100,
     }
   }, [rows])
+
+  // Theo mẫu chuẩn: KQ cuối cùng = IF(KQ N+1 = 0, KQ N, KQ N+1); ĐẠT nếu >= 90%
+  const showManager = canReview || status === 'reviewed' || status === 'approved'
+  const finalTotal = showManager && totals.managerTotal !== 0 ? totals.managerTotal : totals.selfTotal
+  const grade = status === 'draft' ? null : gradeOf(finalTotal)
+
+  async function saveRegistrationComment() {
+    setError('')
+    setMessage('')
+    setSaving(true)
+    const { error: upErr } = await supabase
+      .from('evaluations')
+      .update({ registration_comment: registrationComment || null })
+      .eq('id', id)
+    setSaving(false)
+    if (upErr) setError('Lỗi khi lưu: ' + upErr.message)
+    else setMessage('Đã lưu ý kiến N+1.')
+  }
 
   function updateRow(rowId, field, value) {
     setRows((prev) =>
@@ -191,6 +224,7 @@ export default function EvaluationForm() {
         self_total: totals.selfTotal,
         manager_total: totals.managerTotal,
         manager_comment: managerComment,
+        registration_comment: registrationComment || null,
       }
       if (newStatus) {
         evalUpdate.status = newStatus
@@ -269,16 +303,16 @@ export default function EvaluationForm() {
               <th className="px-2 py-2 font-medium">Cách thức đo</th>
               <th className="px-2 py-2 text-right font-medium">Trọng số %</th>
               <th className="px-2 py-2 font-medium">Tài liệu tham chiếu</th>
-              <th className="px-2 py-2 text-right font-medium">KQ tự đánh giá %</th>
-              <th className="px-2 py-2 text-right font-medium">Hệ số (tự)</th>
+              <th className="px-2 py-2 text-right font-medium">KQ của N %</th>
+              <th className="px-2 py-2 text-right font-medium">Hệ số N</th>
               <th className="px-2 py-2 font-medium">Diễn giải</th>
               {(canReview || status === 'reviewed' || status === 'approved') && (
                 <>
                   <th className="px-2 py-2 text-right font-medium text-blue-700">
-                    KQ quản lý %
+                    KQ của N+1 %
                   </th>
                   <th className="px-2 py-2 text-right font-medium text-blue-700">
-                    Hệ số (QL)
+                    Hệ số N+1
                   </th>
                 </>
               )}
@@ -435,11 +469,60 @@ export default function EvaluationForm() {
         </button>
       )}
 
-      {/* Nhận xét của quản lý */}
+      {/* Tổng hợp kết quả — theo mẫu chuẩn */}
+      <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+        <SummaryTile label="Kết quả của N" value={`${totals.selfTotal}%`} />
+        <SummaryTile
+          label="Kết quả của N+1"
+          value={showManager && totals.managerTotal !== 0 ? `${totals.managerTotal}%` : '—'}
+          sub={showManager && totals.managerTotal === 0 ? 'N+1 chưa chấm → lấy KQ của N' : null}
+        />
+        <SummaryTile label="Kết quả cuối cùng" value={`${finalTotal}%`} strong />
+        <div className="rounded-lg border border-slate-200 bg-white p-3">
+          <div className="text-xs text-slate-500">Xếp loại (ngưỡng {PASS_THRESHOLD}%)</div>
+          <div className="mt-1">
+            {grade ? (
+              <span className={`rounded-full px-2.5 py-0.5 text-sm font-semibold ${GRADE_COLORS[grade]}`}>
+                {grade === 'ĐẠT' ? '✓' : '✕'} {grade}
+              </span>
+            ) : (
+              <span className="text-sm text-slate-400">Chưa gửi</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Ý kiến N+1 khi đăng ký đầu tháng */}
+      {(canCommentRegistration || registrationComment) && (
+        <div className="mt-4">
+          <label className="mb-1 block text-sm font-medium text-slate-700">
+            Ý kiến của N+1 khi đăng ký đầu tháng
+          </label>
+          <textarea
+            value={registrationComment}
+            onChange={(e) => setRegistrationComment(e.target.value)}
+            disabled={!canCommentRegistration}
+            rows={2}
+            className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50"
+            placeholder="Góp ý về mục tiêu, trọng số đăng ký..."
+          />
+          {canCommentRegistration && !canReview && (
+            <button
+              onClick={saveRegistrationComment}
+              disabled={saving}
+              className="mt-2 rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+            >
+              Lưu ý kiến
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Đánh giá của N+1 */}
       {(canReview || status === 'reviewed' || status === 'approved') && (
         <div className="mt-4">
           <label className="mb-1 block text-sm font-medium text-slate-700">
-            Nhận xét của quản lý
+            Đánh giá của N+1
           </label>
           <textarea
             value={managerComment}
@@ -490,12 +573,31 @@ export default function EvaluationForm() {
             </button>
           </>
         )}
+        {evaluation.source_file && (
+          <p className="text-xs text-slate-400">
+            Nhập từ Excel: {evaluation.source_file}
+            {evaluation.imported_at ? ` · ${new Date(evaluation.imported_at).toLocaleString('vi-VN')}` : ''}
+            {evaluation.imported_by ? ` · bởi ${evaluation.imported_by}` : ''}
+          </p>
+        )}
         {readOnly && (
           <p className="text-sm text-slate-500">
             Phiếu đang ở trạng thái chỉ đọc.
           </p>
         )}
       </div>
+    </div>
+  )
+}
+
+function SummaryTile({ label, value, sub, strong }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-3">
+      <div className="text-xs text-slate-500">{label}</div>
+      <div className={`mt-0.5 tabular-nums ${strong ? 'text-xl font-bold text-slate-900' : 'text-lg font-semibold text-slate-800'}`}>
+        {value}
+      </div>
+      {sub && <div className="text-[11px] text-slate-400">{sub}</div>}
     </div>
   )
 }

@@ -1,251 +1,638 @@
-// Tạo & đọc template Excel nhập KPI hàng loạt.
-// exceljs được nạp động (dynamic import) để không làm nặng bundle chính.
-import { CATEGORIES, formatPeriod } from './constants'
-
-export const TEMPLATE_VERSION = 1
-export const APP_MARKER = 'KPI_REVIEW_TEMPLATE'
+// Đọc & tạo file Excel theo MẪU CHUẨN "Đăng kí & đánh giá KPI tháng".
+//
+// Mẫu gồm 2 sheet, mỗi file là phiếu của 1 người:
+//   • "Đăng ký đầu tháng"  : STT | TÊN MỤC TIÊU | CÁCH THỨC ĐO | TRỌNG SỐ | MỤC TIÊU CẦN ĐẠT
+//                            + "Ý KIẾN CỦA N+1"
+//   • "Đánh giá cuối tháng": STT | TÊN MỤC TIÊU | MỤC TIÊU CẦN ĐẠT | CÁCH THỨC ĐO | TRỌNG SỐ |
+//                            TÀI LIỆU THAM CHIẾU | KQ CỦA N | HỆ SỐ N | KQ CỦA N+1 | HỆ SỐ N+1
+//                            + KẾT QUẢ CỦA N / N+1, ĐÁNH GIÁ CỦA N+1, KẾT QUẢ CUỐI CÙNG, XẾP LOẠI
+// Tên file: "<Họ và tên>_ Đăng kí & đánh giá KPI tháng_<YYYY-MM>.xlsx"
+//
+// Parser đọc theo TIÊU ĐỀ CỘT (không phụ thuộc vị trí cố định), nhận số dạng
+// tỷ lệ (0.9 / ô định dạng %) lẫn dạng số (90) và quy về thang 0–100.
+// exceljs được nạp động để không làm nặng bundle chính.
+import {
+  CATEGORIES,
+  PASS_THRESHOLD,
+  formatPeriod,
+  normalizeName,
+  round2,
+  STATUS_LABELS,
+} from './constants'
 
 export const MAX_ROWS_PER_USER = 20
-export const MAX_TOTAL_ROWS = 800
+const MIN_TEMPLATE_ROWS = 10
 
-// Vị trí cố định để đọc lại file
-const HEADER_ROW = 3
-const FIRST_DATA_ROW = 4
+const SHEET_REG = 'Đăng ký đầu tháng'
+const SHEET_EVAL = 'Đánh giá cuối tháng'
 
-const COLUMNS = [
-  { key: 'username', header: 'Username', width: 18 },
-  { key: 'ho_va_ten', header: 'Họ tên (tham khảo)', width: 22 },
-  { key: 'category', header: 'Nhóm', width: 14 },
-  { key: 'name', header: 'Tên mục tiêu', width: 20 },
-  { key: 'target', header: 'Mục tiêu cần đạt', width: 34 },
-  { key: 'measure_method', header: 'Cách thức đo', width: 30 },
-  { key: 'weight', header: 'Trọng số (nhập số, vd: 40)', width: 16 },
-  { key: 'reference_doc', header: 'Tài liệu tham chiếu', width: 20 },
-  { key: 'self_result', header: 'Kết quả đạt được (nhập số 0-100)', width: 18 },
-  { key: 'coeff', header: 'Hệ số kết quả (tự tính)', width: 16 },
-  { key: 'self_explanation', header: 'Diễn giải chi tiết', width: 30 },
-]
-
-const COL = {} // key -> chỉ số cột (1-based)
-COLUMNS.forEach((c, i) => (COL[c.key] = i + 1))
-
-function colLetter(idx) {
-  let s = ''
-  while (idx > 0) {
-    const m = (idx - 1) % 26
-    s = String.fromCharCode(65 + m) + s
-    idx = Math.floor((idx - 1) / 26)
-  }
-  return s
+export function standardFileName(personName, period) {
+  const safe = String(personName || 'Nhan vien').replace(/[\\/:*?"<>|]/g, '').trim()
+  return `${safe}_ Đăng kí & đánh giá KPI tháng_${period}.xlsx`
 }
 
-// ---------------------------------------------------------------- TẠO TEMPLATE
-export async function buildTemplate({ period, users, rows }) {
-  const ExcelJS = (await import('exceljs')).default
+async function loadExcelJS() {
+  return (await import('exceljs')).default
+}
+
+// ================================================================ ĐỌC Ô
+function rawValue(cellValue) {
+  if (cellValue === null || cellValue === undefined) return null
+  if (typeof cellValue === 'object' && !(cellValue instanceof Date)) {
+    if (cellValue.result !== undefined) return cellValue.result
+    if (cellValue.formula !== undefined || cellValue.sharedFormula !== undefined) return null
+    if (cellValue.richText) return cellValue.richText.map((t) => t.text).join('')
+    if (cellValue.text !== undefined) return cellValue.text
+    if (cellValue.error) return null
+  }
+  return cellValue
+}
+
+export function cellText(cell) {
+  const v = rawValue(cell?.value)
+  if (v === null || v === undefined) return ''
+  if (v instanceof Date) return v.toISOString().slice(0, 10)
+  return String(v).replace(/\r\n/g, '\n').trim()
+}
+
+/**
+ * Đọc ô phần trăm về thang 0–100.
+ *   - Ô định dạng % (lưu 0.9)  -> 90
+ *   - Số <= 1 (mẫu chuẩn nhập theo tỷ lệ) -> ×100
+ *   - Số > 1 (người nhập 90)   -> 90
+ *   - Chuỗi "90%", "90", "0,9" -> 90
+ * Trả null nếu trống, NaN nếu không phải số.
+ */
+export function cellPercent(cell) {
+  const v = rawValue(cell?.value)
+  if (v === null || v === undefined || v === '') return null
+  const fmt = String(cell?.numFmt || '')
+  if (typeof v === 'number') {
+    if (fmt.includes('%') || Math.abs(v) <= 1) return round2(v * 100)
+    return round2(v)
+  }
+  const s = String(v).trim()
+  if (s === '') return null
+  const hasPct = s.includes('%')
+  const n = Number(s.replace('%', '').replace(/\s/g, '').replace(',', '.'))
+  if (!Number.isFinite(n)) return NaN
+  if (hasPct) return round2(n)
+  return Math.abs(n) <= 1 ? round2(n * 100) : round2(n)
+}
+
+const PLACEHOLDER = /^\[?\s*điền text\s*\]?$/i
+function cleanComment(s) {
+  const t = String(s || '').trim()
+  return PLACEHOLDER.test(t) ? '' : t
+}
+
+// ================================================================ TÊN FILE
+export function parseFileName(fileName) {
+  const base = String(fileName || '')
+    .replace(/\.[^.]+$/, '')
+    .replace(/\s*\(\d+\)\s*$/, '') // "… (1)" khi tải trùng tên
+  let period = null
+  const re = /(20\d{2})[-_.\s]?(0?[1-9]|1[0-2])(?!\d)/g
+  let m
+  while ((m = re.exec(base))) period = `${m[1]}-${String(m[2]).padStart(2, '0')}`
+  const personName = base.split('_')[0].trim()
+  return { personName, period }
+}
+
+// ================================================================ SHEET
+function findSheet(wb, key) {
+  const want = normalizeName(key)
+  return wb.worksheets.find((ws) => normalizeName(ws.name).includes(want)) || null
+}
+
+// Map tiêu đề -> trường. Thứ tự quan trọng: "n+1" phải kiểm tra trước "n".
+function headerField(text) {
+  const h = normalizeName(text)
+  if (!h) return null
+  if (h === 'stt') return 'stt'
+  if (h.includes('he so')) return null
+  if (h.includes('ten muc tieu')) return 'name'
+  if (h.includes('muc tieu can dat')) return 'target'
+  if (h.includes('cach thuc do')) return 'measure_method'
+  if (h.includes('trong so')) return 'weight'
+  if (h.includes('tai lieu')) return 'reference_doc'
+  if (h.includes('n+1') && h.includes('ket qua')) return 'manager_result'
+  if (h.includes('ket qua') && /cua n\b/.test(h)) return 'self_result'
+  return null
+}
+
+function readSheet(ws) {
+  if (!ws) return null
+  // Tìm dòng tiêu đề trong 20 dòng đầu
+  let headerRow = 0
+  const cols = {}
+  for (let r = 1; r <= Math.min(20, ws.rowCount); r++) {
+    const row = ws.getRow(r)
+    const found = {}
+    row.eachCell({ includeEmpty: false }, (cell, c) => {
+      const f = headerField(cellText(cell))
+      if (f && !found[f]) found[f] = c
+    })
+    if (found.stt && found.name) {
+      headerRow = r
+      Object.assign(cols, found)
+      break
+    }
+  }
+  if (!headerRow) return { headerFound: false, rows: [], comments: {} }
+
+  const rows = []
+  const comments = {}
+  let r = headerRow + 1
+  for (; r <= ws.rowCount; r++) {
+    const row = ws.getRow(r)
+    const first = normalizeName(cellText(row.getCell(1)))
+    if (first.startsWith('tong')) break
+    const get = (k) => (cols[k] ? row.getCell(cols[k]) : null)
+    const item = {
+      excelRow: r,
+      name: cellText(get('name')),
+      target: cellText(get('target')),
+      measure_method: cellText(get('measure_method')),
+      reference_doc: cellText(get('reference_doc')),
+      weight: cellPercent(get('weight')),
+      self_result: cols.self_result ? cellPercent(get('self_result')) : null,
+      manager_result: cols.manager_result ? cellPercent(get('manager_result')) : null,
+    }
+    const empty =
+      !item.name && !item.target && !item.measure_method && !item.reference_doc &&
+      item.weight === null && item.self_result === null && item.manager_result === null
+    if (!empty) rows.push(item)
+  }
+
+  // Phần tổng hợp phía dưới: nhãn ở cột A, giá trị ở ô có dữ liệu đầu tiên bên phải
+  for (; r <= ws.rowCount; r++) {
+    const row = ws.getRow(r)
+    const label = normalizeName(cellText(row.getCell(1)))
+    if (!label) continue
+    let value = ''
+    for (let c = 2; c <= Math.max(row.cellCount, 4); c++) {
+      const cell = row.getCell(c)
+      // Ô phụ của vùng merge chứa nhãn (vd A19:B19) trả về chính nhãn -> bỏ qua
+      if (cell.isMerged && cell.master.address !== cell.address && cell.master.col === 1) continue
+      const t = cellText(cell)
+      if (t) {
+        value = t
+        break
+      }
+    }
+    if (label.startsWith('y kien cua n+1')) comments.registration = cleanComment(value)
+    else if (label.startsWith('danh gia cua n+1')) comments.manager = cleanComment(value)
+  }
+
+  return { headerFound: true, cols, rows, comments }
+}
+
+function mapCategory(name) {
+  const n = normalizeName(name)
+  const hit = CATEGORIES.find((c) => normalizeName(c) === n)
+  return hit || 'Khác'
+}
+
+/**
+ * Đọc 1 file mẫu chuẩn. Không kiểm tra quyền/trạng thái (trang gọi lo).
+ * Trả { fatal } nếu không đọc được, hoặc:
+ * { fileName, personName, period, source, objectives, registrationComment,
+ *   managerComment, hasSelfResults, hasManagerResults, errors, warnings, totals }
+ */
+export async function parseStandardFile(file) {
+  const ExcelJS = await loadExcelJS()
+  const wb = new ExcelJS.Workbook()
+  try {
+    await wb.xlsx.load(await file.arrayBuffer())
+  } catch {
+    return {
+      fileName: file.name,
+      fatal: 'Không đọc được file. Hãy lưu lại dưới dạng .xlsx (không phải .xls/.csv) rồi thử lại.',
+    }
+  }
+
+  const { personName, period } = parseFileName(file.name)
+  const reg = readSheet(findSheet(wb, SHEET_REG))
+  const ev = readSheet(findSheet(wb, SHEET_EVAL))
+
+  if (!reg?.headerFound && !ev?.headerFound) {
+    return {
+      fileName: file.name,
+      personName,
+      period,
+      fatal: `Không thấy sheet "${SHEET_REG}" hoặc "${SHEET_EVAL}" đúng mẫu (thiếu dòng tiêu đề STT / TÊN MỤC TIÊU).`,
+    }
+  }
+
+  const errors = []
+  const warnings = []
+
+  // Ưu tiên sheet Đánh giá cuối tháng (đầy đủ nhất); trống thì dùng sheet Đăng ký
+  const useEval = ev?.headerFound && ev.rows.some((x) => x.weight !== null || x.name)
+  const src = useEval ? ev : reg
+  const source = useEval ? 'evaluation' : 'registration'
+
+  if (useEval && reg?.headerFound && reg.rows.length && reg.rows.length !== ev.rows.length) {
+    warnings.push(
+      `Sheet "${SHEET_REG}" có ${reg.rows.length} mục tiêu, sheet "${SHEET_EVAL}" có ${ev.rows.length} — dùng số liệu sheet Đánh giá.`
+    )
+  }
+  if (!useEval) warnings.push(`Sheet "${SHEET_EVAL}" trống — chỉ nhập phần Đăng ký đầu tháng (chưa có kết quả).`)
+
+  const objectives = src.rows.map((r) => {
+    const where = `${source === 'evaluation' ? 'Đánh giá' : 'Đăng ký'} dòng ${r.excelRow}`
+    if (!r.name) errors.push(`${where}: thiếu Tên mục tiêu.`)
+    if (!r.target && !r.measure_method) warnings.push(`${where}: chưa có Mục tiêu cần đạt / Cách thức đo.`)
+    if (r.weight === null) errors.push(`${where}: thiếu Trọng số.`)
+    else if (Number.isNaN(r.weight)) errors.push(`${where}: Trọng số không phải số.`)
+    else if (r.weight <= 0 || r.weight > 100) errors.push(`${where}: Trọng số phải trong 0–100% (đang ${r.weight}%).`)
+    for (const [k, label] of [['self_result', 'Kết quả của N'], ['manager_result', 'Kết quả của N+1']]) {
+      const v = r[k]
+      if (v === null) continue
+      if (Number.isNaN(v)) errors.push(`${where}: ${label} không phải số.`)
+      else if (v < 0 || v > 100) errors.push(`${where}: ${label} phải trong 0–100% (đang ${v}%).`)
+    }
+    return {
+      category: mapCategory(r.name),
+      name: r.name,
+      target: r.target,
+      measure_method: r.measure_method,
+      reference_doc: r.reference_doc,
+      weight: Number.isFinite(r.weight) ? r.weight : 0,
+      self_result: Number.isFinite(r.self_result) ? r.self_result : null,
+      manager_result: Number.isFinite(r.manager_result) ? r.manager_result : null,
+    }
+  })
+
+  if (!objectives.length) errors.push('File chưa có dòng mục tiêu nào.')
+  if (objectives.length > MAX_ROWS_PER_USER)
+    errors.push(`Có ${objectives.length} mục tiêu, vượt tối đa ${MAX_ROWS_PER_USER}.`)
+
+  const totals = computeTotals(objectives)
+  if (objectives.length && Math.abs(totals.weight - 100) > 0.01)
+    errors.push(`Tổng trọng số = ${totals.weight}%, phải bằng 100%.`)
+
+  const hasSelfResults = objectives.some((o) => o.self_result !== null)
+  const hasManagerResults = objectives.some((o) => o.manager_result !== null)
+
+  return {
+    fatal: null,
+    fileName: file.name,
+    personName,
+    period,
+    source,
+    objectives,
+    registrationComment: reg?.comments?.registration || '',
+    managerComment: ev?.comments?.manager || '',
+    hasSelfResults,
+    hasManagerResults,
+    totals,
+    errors,
+    warnings,
+  }
+}
+
+export function computeTotals(objectives) {
+  let weight = 0
+  let self = 0
+  let manager = 0
+  for (const o of objectives) {
+    const w = Number(o.weight) || 0
+    weight += w
+    self += (w * (Number(o.self_result) || 0)) / 100
+    manager += (w * (Number(o.manager_result) || 0)) / 100
+  }
+  const selfT = round2(self)
+  const managerT = round2(manager)
+  const final = managerT === 0 ? selfT : managerT
+  return { weight: round2(weight), self: selfT, manager: managerT, final }
+}
+
+// ================================================================ TẠO FILE MẪU CHUẨN
+const C = {
+  title: 'FF17365D',
+  header: 'FF1F4E78',
+  input: 'FFFFF2CC',
+  calc: 'FFEAF0F6',
+  label: 'FFF3F6F9',
+  ink: 'FF243447',
+  calcInk: 'FF1F4E78',
+  white: 'FFFFFFFF',
+  note: 'FF7F6000',
+}
+const thin = { style: 'thin', color: { argb: 'FFB7C4D4' } }
+const BORDER = { top: thin, left: thin, bottom: thin, right: thin }
+const fill = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } })
+
+function styleTitle(ws, row, lastCol, text) {
+  ws.mergeCells(row, 1, row, lastCol)
+  const c = ws.getCell(row, 1)
+  c.value = text
+  c.fill = fill(C.title)
+  c.font = { bold: true, size: 13, color: { argb: C.white } }
+  c.alignment = { vertical: 'middle', horizontal: 'center' }
+  ws.getRow(row).height = 24
+}
+
+function styleNote(ws, row, lastCol, text) {
+  ws.mergeCells(row, 1, row, lastCol)
+  const c = ws.getCell(row, 1)
+  c.value = text
+  c.font = { italic: true, size: 10, color: { argb: C.note } }
+  c.alignment = { wrapText: true, vertical: 'middle' }
+  ws.getRow(row).height = 21
+}
+
+function styleHeader(cell, text) {
+  cell.value = text
+  cell.fill = fill(C.header)
+  cell.font = { bold: true, color: { argb: C.white } }
+  cell.alignment = { wrapText: true, vertical: 'middle', horizontal: 'center' }
+  cell.border = BORDER
+}
+
+function styleInput(cell, { pct = false, center = false } = {}) {
+  cell.fill = fill(C.input)
+  cell.font = { color: { argb: C.ink } }
+  cell.alignment = { wrapText: true, vertical: 'top', horizontal: center || pct ? 'center' : 'left' }
+  cell.border = BORDER
+  if (pct) cell.numFmt = '0%'
+}
+
+function styleCalc(cell, numFmt = '0%') {
+  cell.fill = fill(C.calc)
+  cell.font = { color: { argb: C.calcInk } }
+  cell.alignment = { vertical: 'top', horizontal: 'center' }
+  cell.border = BORDER
+  cell.numFmt = numFmt
+}
+
+function styleTotal(cell, numFmt) {
+  cell.fill = fill(C.title)
+  cell.font = { bold: true, color: { argb: C.white } }
+  cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true }
+  if (numFmt) cell.numFmt = numFmt
+}
+
+function styleLabel(cell) {
+  cell.fill = fill(C.label)
+  cell.font = { color: { argb: C.ink } }
+  cell.alignment = { vertical: 'middle', wrapText: true }
+  cell.border = BORDER
+}
+
+const pctValidation = (title) => ({
+  type: 'decimal',
+  operator: 'between',
+  allowBlank: true,
+  formulae: [0, 1],
+  showErrorMessage: true,
+  errorStyle: 'stop',
+  errorTitle: title,
+  error: 'Nhập tỷ lệ từ 0% đến 100% (vd: 90%).',
+})
+
+const frac = (v) => (v === null || v === undefined || v === '' ? null : round2(v) / 100)
+
+/**
+ * Tạo file mẫu chuẩn cho 1 người, điền sẵn dữ liệu nếu có.
+ * objectives: [{ name, target, measure_method, weight, reference_doc, self_result, manager_result }]
+ */
+export async function buildStandardWorkbook({
+  personName,
+  period,
+  objectives = [],
+  registrationComment = '',
+  managerComment = '',
+}) {
+  const ExcelJS = await loadExcelJS()
   const wb = new ExcelJS.Workbook()
   wb.creator = 'KPI Review'
   wb.created = new Date()
 
-  const dataRowCount = Math.max(rows.length + 20, 60) // chừa dòng trống để nhập thêm
-  const lastDataRow = FIRST_DATA_ROW + dataRowCount - 1
+  const n = Math.min(Math.max(objectives.length, MIN_TEMPLATE_ROWS), MAX_ROWS_PER_USER)
+  const first = 6
+  const last = first + n - 1
+  const totalRow = last + 1
+  const sumTitle = totalRow + 2
+  const pass = PASS_THRESHOLD / 100
 
-  // ---------- Sheet danh mục (nguồn cho dropdown) ----------
-  const ref = wb.addWorksheet('_DanhMuc')
-  ref.getCell('A1').value = 'Nhóm'
-  CATEGORIES.forEach((c, i) => (ref.getCell(`A${i + 2}`).value = c))
-  ref.getCell('B1').value = 'Username'
-  ref.getCell('C1').value = 'Họ tên'
-  users.forEach((u, i) => {
-    ref.getCell(`B${i + 2}`).value = u.username
-    ref.getCell(`C${i + 2}`).value = u.ho_va_ten || ''
-  })
-  ref.state = 'veryHidden'
-
-  // ---------- Sheet metadata (chống nộp nhầm / template cũ) ----------
-  const meta = wb.addWorksheet('_meta')
-  meta.getCell('A1').value = 'marker'
-  meta.getCell('B1').value = APP_MARKER
-  meta.getCell('A2').value = 'version'
-  meta.getCell('B2').value = TEMPLATE_VERSION
-  meta.getCell('A3').value = 'period'
-  meta.getCell('B3').value = period
-  meta.getCell('A4').value = 'generated_at'
-  meta.getCell('B4').value = new Date().toISOString()
-  meta.state = 'veryHidden'
-
-  // ---------- Sheet nhập liệu chính ----------
-  const ws = wb.addWorksheet('KPI', {
-    views: [{ state: 'frozen', ySplit: HEADER_ROW }],
-  })
-
-  ws.mergeCells(1, 1, 1, COLUMNS.length)
-  const title = ws.getCell(1, 1)
-  title.value = `PHIẾU KPI ${formatPeriod(period).toUpperCase()} — điền các dòng mục tiêu bên dưới`
-  title.font = { bold: true, size: 13, color: { argb: 'FF1D4ED8' } }
-  title.alignment = { vertical: 'middle' }
-  ws.getRow(1).height = 24
-
-  ws.mergeCells(2, 1, 2, COLUMNS.length)
-  const note = ws.getCell(2, 1)
-  note.value =
-    'Lưu ý: Username và Nhóm chọn từ danh sách xổ xuống. Trọng số & Kết quả nhập SỐ (không nhập dấu %). ' +
-    'Tổng trọng số của MỖI người phải = 100 (xem sheet "KiemTra"). Cột Hệ số kết quả tự tính, không sửa.'
-  note.font = { size: 10, italic: true, color: { argb: 'FF92400E' } }
-  note.alignment = { wrapText: true, vertical: 'middle' }
-  ws.getRow(2).height = 30
-
-  // Header
-  COLUMNS.forEach((c, i) => {
-    const cell = ws.getCell(HEADER_ROW, i + 1)
-    cell.value = c.header
-    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } }
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } }
-    cell.alignment = { wrapText: true, vertical: 'middle', horizontal: 'center' }
-    ws.getColumn(i + 1).width = c.width
-  })
-  ws.getRow(HEADER_ROW).height = 32
-
-  // Dữ liệu sẵn có
-  rows.forEach((r, i) => {
-    const rowIdx = FIRST_DATA_ROW + i
-    ws.getCell(rowIdx, COL.username).value = r.username
-    ws.getCell(rowIdx, COL.ho_va_ten).value = r.ho_va_ten || ''
-    ws.getCell(rowIdx, COL.category).value = r.category || ''
-    ws.getCell(rowIdx, COL.name).value = r.name || ''
-    ws.getCell(rowIdx, COL.target).value = r.target || ''
-    ws.getCell(rowIdx, COL.measure_method).value = r.measure_method || ''
-    ws.getCell(rowIdx, COL.weight).value = Number(r.weight) || 0
-    ws.getCell(rowIdx, COL.reference_doc).value = r.reference_doc || ''
-    ws.getCell(rowIdx, COL.self_result).value = Number(r.self_result) || 0
-    ws.getCell(rowIdx, COL.self_explanation).value = r.self_explanation || ''
-  })
-
-  const wCol = colLetter(COL.weight)
-  const rCol = colLetter(COL.self_result)
-
-  // Ràng buộc + định dạng cho toàn vùng nhập
-  for (let rowIdx = FIRST_DATA_ROW; rowIdx <= lastDataRow; rowIdx++) {
-    // Dropdown Username -> chỉ chọn người trong phạm vi quyền
-    ws.getCell(rowIdx, COL.username).dataValidation = {
-      type: 'list',
-      allowBlank: true,
-      formulae: [`=_DanhMuc!$B$2:$B$${users.length + 1}`],
-      showErrorMessage: true,
-      errorStyle: 'stop',
-      errorTitle: 'Username không hợp lệ',
-      error: 'Chọn Username từ danh sách xổ xuống.',
+  // ---------------- Sheet 1: Đăng ký đầu tháng
+  const r1 = wb.addWorksheet(SHEET_REG, { views: [{ state: 'frozen', ySplit: 5 }] })
+  ;[5.4, 25, 32.7, 23.7, 35.3].forEach((w, i) => (r1.getColumn(i + 1).width = w))
+  styleTitle(r1, 1, 5, 'PHIẾU ĐĂNG KÝ KPI ĐẦU THÁNG')
+  styleNote(r1, 2, 5, 'Hướng dẫn: Nhập thông tin mục tiêu, trọng số tại các ô nền vàng. Các ô nền xanh được tính tự động.')
+  styleNote(r1, 3, 5, 'Lưu ý: Tổng trọng số các mục tiêu cần bằng 100%, nhập theo tỷ lệ từ 0% đến 100%.')
+  r1.mergeCells(4, 1, 4, 5)
+  r1.getCell(4, 1).value = `Nhân viên: ${personName || ''}   ·   Kỳ: ${formatPeriod(period)}`
+  r1.getCell(4, 1).font = { bold: true, color: { argb: C.calcInk } }
+  ;['STT', 'TÊN MỤC TIÊU', 'CÁCH THỨC ĐO', 'TRỌNG SỐ', 'MỤC TIÊU CẦN ĐẠT'].forEach((h, i) =>
+    styleHeader(r1.getCell(5, i + 1), h)
+  )
+  for (let i = 0; i < n; i++) {
+    const r = first + i
+    const o = objectives[i] || {}
+    const stt = r1.getCell(r, 1)
+    stt.value = i + 1
+    styleLabel(stt)
+    stt.alignment = { horizontal: 'center', vertical: 'top' }
+    const cells = [
+      [2, o.name || null, {}],
+      [3, o.measure_method || null, {}],
+      [4, frac(o.weight), { pct: true }],
+      [5, o.target || null, {}],
+    ]
+    for (const [c, v, opt] of cells) {
+      const cell = r1.getCell(r, c)
+      cell.value = v
+      styleInput(cell, opt)
     }
-
-    // Dropdown Nhóm -> đúng 7 nhóm
-    ws.getCell(rowIdx, COL.category).dataValidation = {
-      type: 'list',
-      allowBlank: true,
-      formulae: [`=_DanhMuc!$A$2:$A$${CATEGORIES.length + 1}`],
-      showErrorMessage: true,
-      errorStyle: 'stop',
-      errorTitle: 'Nhóm không hợp lệ',
-      error: 'Chọn Nhóm từ danh sách xổ xuống.',
-    }
-
-    // Trọng số: số, 0 < x <= 100
-    ws.getCell(rowIdx, COL.weight).dataValidation = {
-      type: 'decimal',
-      operator: 'between',
-      allowBlank: true,
-      formulae: [0.01, 100],
-      showErrorMessage: true,
-      errorStyle: 'stop',
-      errorTitle: 'Trọng số không hợp lệ',
-      error: 'Trọng số phải là số trong khoảng 0 đến 100 (nhập số, không nhập %).',
-    }
-    ws.getCell(rowIdx, COL.weight).numFmt = '0.##'
-
-    // Kết quả: số, 0 <= x <= 100
-    ws.getCell(rowIdx, COL.self_result).dataValidation = {
-      type: 'decimal',
-      operator: 'between',
-      allowBlank: true,
-      formulae: [0, 100],
-      showErrorMessage: true,
-      errorStyle: 'stop',
-      errorTitle: 'Kết quả không hợp lệ',
-      error: 'Kết quả phải là số từ 0 đến 100 (nhập số, không nhập %).',
-    }
-    ws.getCell(rowIdx, COL.self_result).numFmt = '0.##'
-
-    // Hệ số kết quả: CÔNG THỨC, khoá không cho sửa
-    const coeffCell = ws.getCell(rowIdx, COL.coeff)
-    coeffCell.value = {
-      formula: `IF(OR(${wCol}${rowIdx}="",${rCol}${rowIdx}=""),"",ROUND(${wCol}${rowIdx}*${rCol}${rowIdx}/100,2))`,
-    }
-    coeffCell.numFmt = '0.##'
-    coeffCell.protection = { locked: true }
-    coeffCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } }
-
-    // Các ô nhập -> mở khoá
-    ;['username', 'ho_va_ten', 'category', 'name', 'target', 'measure_method',
-      'weight', 'reference_doc', 'self_result', 'self_explanation'].forEach((k) => {
-      ws.getCell(rowIdx, COL[k]).protection = { locked: false }
-    })
-
-    ws.getCell(rowIdx, COL.target).alignment = { wrapText: true, vertical: 'top' }
-    ws.getCell(rowIdx, COL.measure_method).alignment = { wrapText: true, vertical: 'top' }
-    ws.getCell(rowIdx, COL.self_explanation).alignment = { wrapText: true, vertical: 'top' }
+    r1.getCell(r, 4).dataValidation = pctValidation('Trọng số không hợp lệ')
   }
+  r1.mergeCells(totalRow, 1, totalRow, 3)
+  styleTotal(r1.getCell(totalRow, 1))
+  r1.getCell(totalRow, 1).value = 'TỔNG TRỌNG SỐ'
+  r1.getCell(totalRow, 4).value = { formula: `SUM(D${first}:D${last})` }
+  styleTotal(r1.getCell(totalRow, 4), '0%')
+  r1.mergeCells(sumTitle, 1, sumTitle, 3)
+  r1.getCell(sumTitle, 1).value = 'TỔNG HỢP'
+  styleTotal(r1.getCell(sumTitle, 1))
+  r1.mergeCells(sumTitle + 1, 1, sumTitle + 1, 2)
+  r1.getCell(sumTitle + 1, 1).value = 'Ý KIẾN CỦA N+1 (nếu có)'
+  styleLabel(r1.getCell(sumTitle + 1, 1))
+  r1.mergeCells(sumTitle + 1, 3, sumTitle + 1, 5)
+  r1.getCell(sumTitle + 1, 3).value = registrationComment || '[Điền text]'
+  styleInput(r1.getCell(sumTitle + 1, 3))
+  r1.getRow(sumTitle + 1).height = 36
 
-  // Khoá sheet: chỉ sửa được ô đã mở khoá ở trên
-  await ws.protect('kpi', {
-    selectLockedCells: true,
-    selectUnlockedCells: true,
-    formatCells: false,
-    insertRows: false,
-    deleteRows: false,
-  })
-
-  // ---------- Sheet kiểm tra tổng trọng số theo từng người ----------
-  const chk = wb.addWorksheet('KiemTra')
-  chk.getCell('A1').value = 'BẢNG KIỂM TRA — Tổng trọng số của mỗi người phải bằng 100'
-  chk.getCell('A1').font = { bold: true, size: 12, color: { argb: 'FF1D4ED8' } }
-  ;['Username', 'Họ tên', 'Tổng trọng số', 'Kết luận'].forEach((h, i) => {
-    const c = chk.getCell(3, i + 1)
-    c.value = h
-    c.font = { bold: true, color: { argb: 'FFFFFFFF' } }
-    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } }
-  })
-  chk.getColumn(1).width = 18
-  chk.getColumn(2).width = 24
-  chk.getColumn(3).width = 16
-  chk.getColumn(4).width = 34
-
-  const uCol = colLetter(COL.username)
-  users.forEach((u, i) => {
-    const r = 4 + i
-    chk.getCell(r, 1).value = u.username
-    chk.getCell(r, 2).value = u.ho_va_ten || ''
-    chk.getCell(r, 3).value = {
-      formula: `SUMIF(KPI!$${uCol}$${FIRST_DATA_ROW}:$${uCol}$${lastDataRow},A${r},KPI!$${wCol}$${FIRST_DATA_ROW}:$${wCol}$${lastDataRow})`,
+  // ---------------- Sheet 2: Đánh giá cuối tháng
+  const r2 = wb.addWorksheet(SHEET_EVAL, { views: [{ state: 'frozen', ySplit: 5 }] })
+  ;[5.4, 22, 27, 24.2, 13, 18.6, 11.3, 10.2, 11.3, 10.2].forEach((w, i) => (r2.getColumn(i + 1).width = w))
+  styleTitle(r2, 1, 10, 'PHIẾU ĐÁNH GIÁ KPI CUỐI THÁNG')
+  styleNote(r2, 2, 10, 'Hướng dẫn: Nhập thông tin mục tiêu, trọng số và kết quả đánh giá tại các ô nền vàng. Các ô nền xanh/xám được tính tự động.')
+  styleNote(r2, 3, 10, 'Lưu ý: Tổng trọng số các mục tiêu cần bằng 100%. Kết quả đánh giá nhập theo tỷ lệ từ 0% đến 100%.')
+  styleNote(r2, 4, 10, `Nhân viên: ${personName || ''} · Kỳ: ${formatPeriod(period)} — Nếu N+1 không điền kết quả từng mục tiêu, KẾT QUẢ CUỐI CÙNG lấy kết quả của N.`)
+  ;[
+    'STT', 'TÊN MỤC TIÊU', 'MỤC TIÊU CẦN ĐẠT', 'CÁCH THỨC ĐO', 'TRỌNG SỐ', 'TÀI LIỆU THAM CHIẾU',
+    'KẾT QUẢ ĐÁNH GIÁ CỦA N', 'HỆ SỐ KẾT QUẢ CỦA N', 'KẾT QUẢ ĐÁNH GIÁ CỦA N+1', 'HỆ SỐ KẾT QUẢ CỦA N+1',
+  ].forEach((h, i) => styleHeader(r2.getCell(5, i + 1), h))
+  r2.getRow(5).height = 34
+  for (let i = 0; i < n; i++) {
+    const r = first + i
+    const o = objectives[i] || {}
+    const stt = r2.getCell(r, 1)
+    stt.value = i + 1
+    styleLabel(stt)
+    stt.alignment = { horizontal: 'center', vertical: 'top' }
+    const cells = [
+      [2, o.name || null, {}],
+      [3, o.target || null, {}],
+      [4, o.measure_method || null, {}],
+      [5, frac(o.weight), { pct: true }],
+      [6, o.reference_doc || null, {}],
+      [7, frac(o.self_result), { pct: true }],
+      [9, frac(o.manager_result), { pct: true }],
+    ]
+    for (const [c, v, opt] of cells) {
+      const cell = r2.getCell(r, c)
+      cell.value = v
+      styleInput(cell, opt)
     }
-    chk.getCell(r, 3).numFmt = '0.##'
-    chk.getCell(r, 4).value = {
-      formula: `IF(C${r}=0,"Chưa nhập",IF(ABS(C${r}-100)<0.01,"OK","SAI: tổng phải = 100"))`,
-    }
-  })
-
-  const lastChk = 3 + users.length
-  // Tô đỏ dòng có tổng khác 100 (và khác 0)
-  chk.addConditionalFormatting({
-    ref: `A4:D${lastChk}`,
-    rules: [
-      {
-        type: 'expression',
-        formulae: [`AND($C4<>0,ABS($C4-100)>=0.01)`],
-        style: {
-          fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFEE2E2' } },
-          font: { color: { argb: 'FF991B1B' }, bold: true },
-        },
-      },
+    r2.getCell(r, 5).dataValidation = pctValidation('Trọng số không hợp lệ')
+    r2.getCell(r, 7).dataValidation = pctValidation('Kết quả không hợp lệ')
+    r2.getCell(r, 9).dataValidation = pctValidation('Kết quả không hợp lệ')
+    r2.getCell(r, 8).value = { formula: `G${r}*E${r}` }
+    styleCalc(r2.getCell(r, 8))
+    r2.getCell(r, 10).value = { formula: `I${r}*E${r}` }
+    styleCalc(r2.getCell(r, 10))
+  }
+  r2.mergeCells(totalRow, 1, totalRow, 4)
+  r2.getCell(totalRow, 1).value = 'TỔNG TRỌNG SỐ / KẾT QUẢ'
+  styleTotal(r2.getCell(totalRow, 1))
+  for (const [c, f, fmt] of [
+    [5, `SUM(E${first}:E${last})`, '0%'],
+    [8, `SUM(H${first}:H${last})`, '0.0%'],
+    [10, `SUM(J${first}:J${last})`, '0.0%'],
+  ]) {
+    r2.getCell(totalRow, c).value = { formula: f }
+    styleTotal(r2.getCell(totalRow, c), fmt)
+  }
+  r2.mergeCells(sumTitle, 1, sumTitle, 3)
+  r2.getCell(sumTitle, 1).value = 'TỔNG HỢP KẾT QUẢ ĐÁNH GIÁ'
+  styleTotal(r2.getCell(sumTitle, 1))
+  const s = sumTitle + 1
+  const summary = [
+    ['KẾT QUẢ CỦA N', { formula: `H${totalRow}` }, 'calc', '0.0%'],
+    ['KẾT QUẢ CỦA N+1', { formula: `J${totalRow}` }, 'calc', '0.0%'],
+    ['ĐÁNH GIÁ CỦA N+1', managerComment || '[Điền text]', 'input'],
+    ['KẾT QUẢ CUỐI CÙNG', { formula: `IF(C${s + 1}=0,C${s},C${s + 1})` }, 'calc', '0.0%'],
+    [
+      'XẾP LOẠI KẾT QUẢ',
+      { formula: `IF(C${s + 3}<${pass},"KHÔNG ĐẠT","ĐẠT")` },
+      'calc',
+      'General',
     ],
+  ]
+  summary.forEach(([label, value, kind, fmt], i) => {
+    const r = s + i
+    r2.mergeCells(r, 1, r, 2)
+    r2.getCell(r, 1).value = label
+    styleLabel(r2.getCell(r, 1))
+    const cell = r2.getCell(r, 3)
+    cell.value = value
+    if (kind === 'calc') {
+      styleCalc(cell, fmt)
+      if (label.startsWith('KẾT QUẢ CUỐI') || label.startsWith('XẾP LOẠI')) cell.font = { bold: true, color: { argb: C.calcInk } }
+    } else {
+      r2.mergeCells(r, 3, r, 10)
+      styleInput(cell)
+      r2.getRow(r).height = 36
+    }
   })
+
+  const buffer = await wb.xlsx.writeBuffer()
+  return new Blob([buffer], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  })
+}
+
+// ================================================================ XUẤT TỔNG HỢP ĐỘI
+/**
+ * people: [{ username, ho_va_ten, mien, bu, manager, evaluation, objectives }]
+ */
+export async function buildTeamSummary({ period, people }) {
+  const ExcelJS = await loadExcelJS()
+  const wb = new ExcelJS.Workbook()
+  wb.creator = 'KPI Review'
+
+  const ws = wb.addWorksheet('Tổng hợp', { views: [{ state: 'frozen', ySplit: 3 }] })
+  const heads = [
+    ['STT', 6], ['Username', 16], ['Họ và tên', 24], ['Miền', 10], ['BU', 12], ['Quản lý trực tiếp', 22],
+    ['Trạng thái', 12], ['Số mục tiêu', 10], ['KQ của N', 11], ['KQ của N+1', 11], ['Chênh lệch (N+1 − N)', 13],
+    ['KQ cuối cùng', 12], ['Xếp loại', 12], ['Đánh giá của N+1', 40],
+  ]
+  ws.mergeCells(1, 1, 1, heads.length)
+  ws.getCell(1, 1).value = `TỔNG HỢP KẾT QUẢ KPI — ${formatPeriod(period).toUpperCase()}`
+  ws.getCell(1, 1).font = { bold: true, size: 13, color: { argb: C.white } }
+  ws.getCell(1, 1).fill = fill(C.title)
+  ws.getRow(1).height = 24
+  heads.forEach(([h, w], i) => {
+    styleHeader(ws.getCell(3, i + 1), h)
+    ws.getColumn(i + 1).width = w
+  })
+  ws.getRow(3).height = 32
+  people.forEach((p, i) => {
+    const e = p.evaluation
+    const r = 4 + i
+    const self = e ? Number(e.self_total) / 100 : null
+    const mgr = e && Number(e.manager_total) ? Number(e.manager_total) / 100 : null
+    const fin = e ? (mgr ?? self) : null
+    const vals = [
+      i + 1, p.username, p.ho_va_ten, p.mien || '', p.bu || '', p.manager || '',
+      e ? STATUS_LABELS[e.status] : 'Chưa có phiếu',
+      p.objectives?.length || 0,
+      self, mgr, mgr !== null && self !== null ? mgr - self : null, fin,
+      e && e.status !== 'draft' ? (fin * 100 >= PASS_THRESHOLD ? 'ĐẠT' : 'KHÔNG ĐẠT') : '',
+      e?.manager_comment || '',
+    ]
+    vals.forEach((v, c) => {
+      const cell = ws.getCell(r, c + 1)
+      cell.value = v
+      cell.border = BORDER
+      if (c >= 8 && c <= 11) cell.numFmt = '0.0%'
+    })
+    ws.getCell(r, 14).alignment = { wrapText: true, vertical: 'top' }
+  })
+  ws.autoFilter = { from: { row: 3, column: 1 }, to: { row: 3 + people.length, column: heads.length } }
+
+  const d = wb.addWorksheet('Chi tiết mục tiêu', { views: [{ state: 'frozen', ySplit: 1 }] })
+  const dh = [
+    ['Username', 16], ['Họ và tên', 24], ['STT', 6], ['Tên mục tiêu', 18], ['Mục tiêu cần đạt', 40],
+    ['Cách thức đo', 34], ['Trọng số', 10], ['Tài liệu tham chiếu', 22], ['KQ của N', 10], ['KQ của N+1', 10],
+  ]
+  dh.forEach(([h, w], i) => {
+    styleHeader(d.getCell(1, i + 1), h)
+    d.getColumn(i + 1).width = w
+  })
+  let r = 2
+  for (const p of people) {
+    ;(p.objectives || []).forEach((o, i) => {
+      const vals = [
+        p.username, p.ho_va_ten, i + 1, o.name || o.category, o.target, o.measure_method,
+        frac(o.weight), o.reference_doc, frac(o.self_result), frac(o.manager_result),
+      ]
+      vals.forEach((v, c) => {
+        const cell = d.getCell(r, c + 1)
+        cell.value = v ?? null
+        cell.border = BORDER
+        cell.alignment = { wrapText: true, vertical: 'top' }
+        if (c === 6 || c >= 8) cell.numFmt = '0%'
+      })
+      r++
+    })
+  }
+  if (r > 2) d.autoFilter = { from: { row: 1, column: 1 }, to: { row: r - 1, column: dh.length } }
 
   const buffer = await wb.xlsx.writeBuffer()
   return new Blob([buffer], {
@@ -261,167 +648,5 @@ export function downloadBlob(blob, filename) {
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-}
-
-// ---------------------------------------------------------------- ĐỌC TEMPLATE
-// Chuẩn hoá số: chấp nhận "40,5" và "40.5"; ô lỡ định dạng % (0.4) -> 40
-export function toNumber(cellValue, { percentAware = false } = {}) {
-  if (cellValue === null || cellValue === undefined || cellValue === '') return null
-  let v = cellValue
-  if (typeof v === 'object') {
-    if (v.result !== undefined) v = v.result
-    else if (v.richText) v = v.richText.map((t) => t.text).join('')
-    else return null
-  }
-  if (typeof v === 'number') {
-    // Ô định dạng % trong Excel lưu 0.4 cho "40%"
-    if (percentAware && v > 0 && v < 1) return Math.round(v * 100 * 100) / 100
-    return v
-  }
-  const s = String(v).trim().replace('%', '').replace(/\s/g, '').replace(',', '.')
-  if (s === '') return null
-  const n = Number(s)
-  return Number.isFinite(n) ? n : NaN
-}
-
-function toText(cellValue) {
-  if (cellValue === null || cellValue === undefined) return ''
-  let v = cellValue
-  if (typeof v === 'object') {
-    if (v.result !== undefined) v = v.result
-    else if (v.richText) v = v.richText.map((t) => t.text).join('')
-    else if (v.text) v = v.text
-    else return ''
-  }
-  return String(v).trim()
-}
-
-/**
- * Đọc file template. Chỉ bóc tách + kiểm tra định dạng cơ bản.
- * Việc kiểm tra quyền/trạng thái phiếu do trang gọi thực hiện.
- */
-export async function parseTemplate(file) {
-  const ExcelJS = (await import('exceljs')).default
-  const wb = new ExcelJS.Workbook()
-  try {
-    await wb.xlsx.load(await file.arrayBuffer())
-  } catch {
-    // File hỏng, không phải .xlsx (vd .xls cũ, .csv, file đổi đuôi)
-    return {
-      fatal:
-        'Không đọc được file. Hãy chắc chắn đây là file .xlsx tải từ nút "Tải template" và chưa bị đổi định dạng.',
-    }
-  }
-
-  const meta = wb.getWorksheet('_meta')
-  if (!meta || toText(meta.getCell('B1').value) !== APP_MARKER) {
-    return { fatal: 'File không phải template của ứng dụng. Hãy bấm "Tải template" để lấy file đúng.' }
-  }
-  const version = toNumber(meta.getCell('B2').value)
-  if (version !== TEMPLATE_VERSION) {
-    return {
-      fatal: `Template phiên bản cũ (v${version}). Hãy tải lại template mới nhất (v${TEMPLATE_VERSION}) và nhập lại.`,
-    }
-  }
-  const period = toText(meta.getCell('B3').value)
-  if (!period) return { fatal: 'Template thiếu thông tin kỳ đánh giá.' }
-
-  const ws = wb.getWorksheet('KPI')
-  if (!ws) return { fatal: 'File thiếu sheet "KPI".' }
-
-  const rows = []
-  for (let i = FIRST_DATA_ROW; i <= ws.rowCount; i++) {
-    const row = ws.getRow(i)
-    const username = toText(row.getCell(COL.username).value)
-    const category = toText(row.getCell(COL.category).value)
-    const name = toText(row.getCell(COL.name).value)
-    const target = toText(row.getCell(COL.target).value)
-    const measure_method = toText(row.getCell(COL.measure_method).value)
-    const reference_doc = toText(row.getCell(COL.reference_doc).value)
-    const self_explanation = toText(row.getCell(COL.self_explanation).value)
-    const weightRaw = row.getCell(COL.weight).value
-    const resultRaw = row.getCell(COL.self_result).value
-
-    // Bỏ qua dòng trống hoàn toàn
-    const isEmpty =
-      !username && !category && !name && !target && !measure_method &&
-      weightRaw === null && resultRaw === null
-    if (isEmpty) continue
-
-    rows.push({
-      excelRow: i,
-      username,
-      category,
-      name,
-      target,
-      measure_method,
-      reference_doc,
-      self_explanation,
-      weight: toNumber(weightRaw, { percentAware: true }),
-      self_result: toNumber(resultRaw, { percentAware: true }),
-    })
-
-    if (rows.length > MAX_TOTAL_ROWS) {
-      return { fatal: `File vượt quá ${MAX_TOTAL_ROWS} dòng.` }
-    }
-  }
-
-  return { fatal: null, period, rows }
-}
-
-/**
- * Kiểm tra dữ liệu đã bóc tách. Trả về { errors, byUser }.
- * allowedUsers: Map username -> { ho_va_ten }
- */
-export function validateRows(rows, allowedUsers) {
-  const errors = []
-  const byUser = new Map()
-
-  for (const r of rows) {
-    const where = `Dòng ${r.excelRow}`
-
-    if (!r.username) {
-      errors.push(`${where}: thiếu Username.`)
-      continue
-    }
-    if (!allowedUsers.has(r.username)) {
-      errors.push(`${where}: Username "${r.username}" không tồn tại hoặc ngoài phạm vi bạn được phép nhập.`)
-      continue
-    }
-    if (!r.category || !CATEGORIES.includes(r.category)) {
-      errors.push(`${where}: Nhóm "${r.category || '(trống)'}" không hợp lệ.`)
-    }
-    if (!r.name) errors.push(`${where}: thiếu Tên mục tiêu.`)
-    if (!r.target) errors.push(`${where}: thiếu Mục tiêu cần đạt.`)
-    if (!r.measure_method) errors.push(`${where}: thiếu Cách thức đo.`)
-
-    if (r.weight === null) errors.push(`${where}: thiếu Trọng số.`)
-    else if (Number.isNaN(r.weight)) errors.push(`${where}: Trọng số không phải số.`)
-    else if (r.weight <= 0 || r.weight > 100)
-      errors.push(`${where}: Trọng số phải trong khoảng 0–100 (đang là ${r.weight}).`)
-
-    if (r.self_result === null) r.self_result = 0
-    else if (Number.isNaN(r.self_result)) errors.push(`${where}: Kết quả không phải số.`)
-    else if (r.self_result < 0 || r.self_result > 100)
-      errors.push(`${where}: Kết quả phải trong khoảng 0–100 (đang là ${r.self_result}).`)
-
-    if (!byUser.has(r.username)) byUser.set(r.username, [])
-    byUser.get(r.username).push(r)
-  }
-
-  // Kiểm tra theo từng người: số dòng + tổng trọng số
-  for (const [username, list] of byUser) {
-    if (list.length > MAX_ROWS_PER_USER) {
-      errors.push(`${username}: có ${list.length} dòng, vượt tối đa ${MAX_ROWS_PER_USER}.`)
-    }
-    const total = list.reduce((s, r) => s + (Number(r.weight) || 0), 0)
-    if (Math.abs(total - 100) > 0.01) {
-      errors.push(
-        `${username}: tổng trọng số = ${Math.round(total * 100) / 100}, phải bằng 100.`
-      )
-    }
-  }
-
-  return { errors, byUser }
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

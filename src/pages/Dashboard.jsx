@@ -17,7 +17,7 @@ function StatCard({ label, value, sub, to }) {
 }
 
 export default function Dashboard() {
-  const { username, profile, isManager } = useAuth()
+  const { username, profile, isManager, isAdmin } = useAuth()
   const [loading, setLoading] = useState(true)
   const [latest, setLatest] = useState(null)
   const [pending, setPending] = useState(0)
@@ -33,10 +33,18 @@ export default function Dashboard() {
       setLatest(mine?.[0] || null)
 
       if (isManager) {
-        const { count } = await supabase
+        let q = supabase
           .from('evaluations')
           .select('id', { count: 'exact', head: true })
           .eq('status', 'submitted')
+        if (!isAdmin) {
+          const { data: reports } = await supabase
+            .from('kpi_profiles')
+            .select('username')
+            .eq('manager_username', username)
+          q = q.in('username', (reports || []).map((r) => r.username).concat('__none__'))
+        }
+        const { count } = await q
         setPending(count || 0)
       }
       setLoading(false)
@@ -82,6 +90,14 @@ export default function Dashboard() {
             to="/duyet"
           />
         )}
+        {isManager && (
+          <StatCard
+            label="Báo cáo quản lý"
+            value="Xem →"
+            sub="Tiến độ, phân bố điểm, xu hướng của đội"
+            to="/bao-cao"
+          />
+        )}
       </div>
 
       <div className="mt-8 rounded-xl border border-slate-200 bg-white p-5">
@@ -91,6 +107,10 @@ export default function Dashboard() {
           <li>Thêm các dòng mục tiêu, đảm bảo tổng trọng số bằng 100%.</li>
           <li>Nhập kết quả tự đánh giá rồi bấm <b>Gửi duyệt</b>.</li>
           <li>Quản lý xem lại, chấm điểm và <b>Chốt kết quả</b>.</li>
+          <li>
+            Hoặc dùng <b>Nhập Excel</b> với mẫu chuẩn "Đăng kí & đánh giá KPI tháng" — tải file, điền 2 sheet rồi
+            upload lại (chọn nhiều file một lần được).
+          </li>
         </ol>
       </div>
     </div>

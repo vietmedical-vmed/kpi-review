@@ -6,6 +6,9 @@ import {
   recentPeriods,
   STATUS_LABELS,
   STATUS_COLORS,
+  finalScore,
+  gradeOf,
+  GRADE_COLORS,
 } from '../lib/constants'
 import Spinner from '../components/Spinner'
 
@@ -97,7 +100,7 @@ export default function ManagerReview() {
       {loading ? (
         <Spinner />
       ) : (
-        <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-slate-600">
               <tr>
@@ -105,15 +108,17 @@ export default function ManagerReview() {
                 <th className="px-4 py-3 font-medium">Miền / BU</th>
                 <th className="px-4 py-3 font-medium">Kỳ</th>
                 <th className="px-4 py-3 font-medium">Trạng thái</th>
-                <th className="px-4 py-3 text-right font-medium">Tự đánh giá</th>
-                <th className="px-4 py-3 text-right font-medium">QL chấm</th>
+                <th className="px-4 py-3 text-right font-medium">KQ của N</th>
+                <th className="px-4 py-3 text-right font-medium">KQ của N+1</th>
+                <th className="px-4 py-3 text-right font-medium">Cuối cùng</th>
+                <th className="px-4 py-3 font-medium">Xếp loại</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-slate-400">
+                  <td colSpan={9} className="px-4 py-8 text-center text-slate-400">
                     Không có phiếu nào.
                   </td>
                 </tr>
@@ -141,6 +146,18 @@ export default function ManagerReview() {
                     {e.status === 'reviewed' || e.status === 'approved'
                       ? `${e.manager_total}%`
                       : '—'}
+                  </td>
+                  <td className="px-4 py-3 text-right font-semibold tabular-nums">
+                    {e.status === 'draft' ? '—' : `${finalScore(e)}%`}
+                  </td>
+                  <td className="px-4 py-3">
+                    {e.status !== 'draft' && (
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs font-semibold ${GRADE_COLORS[gradeOf(finalScore(e))]}`}
+                      >
+                        {gradeOf(finalScore(e))}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <button
