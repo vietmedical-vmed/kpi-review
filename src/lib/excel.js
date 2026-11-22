@@ -10,6 +10,8 @@
 // Dòng 4 sheet Đăng ký: ô "NHÂN VIÊN" (dropdown "Họ tên (username)") + ô "KỲ ĐÁNH GIÁ".
 // Khi đọc, ô trong file được ưu tiên hơn tên file (leader upload hộ cả đội,
 // tên file có thể tuỳ ý).
+// Ngoài mẫu chuẩn, parser còn đọc "file cả đội" (dạng file miền Bắc): mỗi sheet
+// "KPI 11 - <Họ tên>" là phiếu 1 người, tên nhân viên lấy từ tên sheet.
 //
 // Parser đọc theo TIÊU ĐỀ CỘT (không phụ thuộc vị trí cố định), nhận số dạng
 // tỷ lệ (0.9 / ô định dạng %) lẫn dạng số (90) và quy về thang 0–100.
@@ -245,27 +247,88 @@ function mapCategory(name) {
   return hit || 'Khác'
 }
 
+// Tên sheet dạng "KPI 11 - Họ tên", "KPI11-Họ tên", " KPI 11- Họ tên" -> "Họ tên"
+export function personFromSheetName(sheetName) {
+  return String(sheetName || '')
+    .replace(/^\s*kpi\s*(th[aá]ng\s*)?(t\s*)?\d{0,2}\s*[-–—:._]*\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+const READ_FAIL = 'Không đọc được file. Hãy lưu lại dưới dạng .xlsx (không phải .xls/.csv) rồi thử lại.'
+
 /**
- * Đọc 1 file mẫu chuẩn. Không kiểm tra quyền/trạng thái (trang gọi lo).
- * Trả { fatal } nếu không đọc được, hoặc:
- * { fileName, personName, period, source, objectives, registrationComment,
- *   managerComment, hasSelfResults, hasManagerResults, errors, warnings, totals }
+ * Đọc 1 file upload. Không kiểm tra quyền/trạng thái (trang gọi lo). Hỗ trợ 2 dạng:
+ *  1. Mẫu chuẩn: sheet "Đăng ký đầu tháng" + "Đánh giá cuối tháng", 1 file = 1 người.
+ *  2. File cả đội (dạng file miền Bắc): mỗi sheet "KPI 11 - <Họ tên>" là phiếu của
+ *     1 người, cột giống sheet Đánh giá. Tên nhân viên lấy từ tên sheet. Sheet không
+ *     có bảng mục tiêu (Tổng hợp, Mục tiêu công nợ...) bị bỏ qua; sheet ẩn bị bỏ qua
+ *     và trả về trong skippedHidden.
+ *
+ * Trả { entries, skippedHidden }. Mỗi entry là { fileName, fatal } nếu không đọc được,
+ * hoặc { fileName, sheetName, personName, identity, period, source, objectives,
+ *   registrationComment, managerComment, hasSelfResults, hasManagerResults,
+ *   errors, warnings, totals }.
  */
-export async function parseStandardFile(file) {
+export async function parseWorkbookFile(file) {
   const ExcelJS = await loadExcelJS()
   const wb = new ExcelJS.Workbook()
   try {
     await wb.xlsx.load(await file.arrayBuffer())
   } catch {
-    return {
-      fileName: file.name,
-      fatal: 'Không đọc được file. Hãy lưu lại dưới dạng .xlsx (không phải .xls/.csv) rồi thử lại.',
-    }
+    return { entries: [{ fileName: file.name, fatal: READ_FAIL }], skippedHidden: [] }
   }
 
-  const { personName, period: filePeriod } = parseFileName(file.name)
+  const { personName, period: fnPeriod } = parseFileName(file.name)
+  const filePeriod = fnPeriod || parsePeriodText(file.name) // "KPI_thang_11_2026_..." -> 2026-11
+
+  // 1. Mẫu chuẩn
   const regWs = findSheet(wb, SHEET_REG)
   const evWs = findSheet(wb, SHEET_EVAL)
+  if (regWs || evWs) {
+    return { entries: [parseStandardSheets(file.name, personName, filePeriod, regWs, evWs)], skippedHidden: [] }
+  }
+
+  // 2. File cả đội: mỗi sheet có bảng mục tiêu là 1 người
+  const entries = []
+  const skippedHidden = []
+  for (const ws of wb.worksheets) {
+    const sh = readSheet(ws)
+    if (!sh.headerFound || !sh.rows.length) continue
+    const sheetName = ws.name.trim()
+    if (ws.state && ws.state !== 'visible') {
+      skippedHidden.push(sheetName)
+      continue
+    }
+    const identity = readIdentity(ws)
+    entries.push(
+      buildParsed({
+        fileName: file.name,
+        sheetName,
+        personName: personFromSheetName(ws.name),
+        identity,
+        period: identity.period || filePeriod,
+        reg: null,
+        ev: sh,
+        team: true,
+      })
+    )
+  }
+  if (!entries.length) {
+    const hidden = skippedHidden.length ? ` (${skippedHidden.length} sheet ẩn đã bị bỏ qua)` : ''
+    entries.push({
+      fileName: file.name,
+      personName,
+      period: filePeriod,
+      fatal:
+        `Không thấy sheet "${SHEET_REG}" / "${SHEET_EVAL}" theo mẫu chuẩn, cũng không thấy sheet nào có ` +
+        `bảng mục tiêu (dòng tiêu đề STT / TÊN MỤC TIÊU)${hidden}.`,
+    })
+  }
+  return { entries, skippedHidden }
+}
+
+function parseStandardSheets(fileName, personName, filePeriod, regWs, evWs) {
   const reg = readSheet(regWs)
   const ev = readSheet(evWs)
   const idReg = readIdentity(regWs)
@@ -278,31 +341,41 @@ export async function parseStandardFile(file) {
 
   if (!reg?.headerFound && !ev?.headerFound) {
     return {
-      fileName: file.name,
+      fileName,
       personName,
       identity,
       period,
       fatal: `Không thấy sheet "${SHEET_REG}" hoặc "${SHEET_EVAL}" đúng mẫu (thiếu dòng tiêu đề STT / TÊN MỤC TIÊU).`,
     }
   }
+  return buildParsed({ fileName, sheetName: '', personName, identity, period, reg, ev, team: false })
+}
 
+function buildParsed({ fileName, sheetName, personName, identity, period, reg, ev, team }) {
   const errors = []
   const warnings = []
 
-  // Ưu tiên sheet Đánh giá cuối tháng (đầy đủ nhất); trống thì dùng sheet Đăng ký
-  const useEval = ev?.headerFound && ev.rows.some((x) => x.weight !== null || x.name)
-  const src = useEval ? ev : reg
-  const source = useEval ? 'evaluation' : 'registration'
-
-  if (useEval && reg?.headerFound && reg.rows.length && reg.rows.length !== ev.rows.length) {
-    warnings.push(
-      `Sheet "${SHEET_REG}" có ${reg.rows.length} mục tiêu, sheet "${SHEET_EVAL}" có ${ev.rows.length} — dùng số liệu sheet Đánh giá.`
-    )
+  let src
+  let source
+  if (team) {
+    src = ev
+    source = 'sheet'
+  } else {
+    // Ưu tiên sheet Đánh giá cuối tháng (đầy đủ nhất); trống thì dùng sheet Đăng ký
+    const useEval = ev?.headerFound && ev.rows.some((x) => x.weight !== null || x.name)
+    src = useEval ? ev : reg
+    source = useEval ? 'evaluation' : 'registration'
+    if (useEval && reg?.headerFound && reg.rows.length && reg.rows.length !== ev.rows.length) {
+      warnings.push(
+        `Sheet "${SHEET_REG}" có ${reg.rows.length} mục tiêu, sheet "${SHEET_EVAL}" có ${ev.rows.length} — dùng số liệu sheet Đánh giá.`
+      )
+    }
+    if (!useEval) warnings.push(`Sheet "${SHEET_EVAL}" trống — chỉ nhập phần Đăng ký đầu tháng (chưa có kết quả).`)
   }
-  if (!useEval) warnings.push(`Sheet "${SHEET_EVAL}" trống — chỉ nhập phần Đăng ký đầu tháng (chưa có kết quả).`)
+  const label = { evaluation: 'Đánh giá', registration: 'Đăng ký', sheet: 'Sheet' }[source]
 
   const objectives = src.rows.map((r) => {
-    const where = `${source === 'evaluation' ? 'Đánh giá' : 'Đăng ký'} dòng ${r.excelRow}`
+    const where = `${label} dòng ${r.excelRow}`
     if (!r.name) errors.push(`${where}: thiếu Tên mục tiêu.`)
     if (!r.target && !r.measure_method) warnings.push(`${where}: chưa có Mục tiêu cần đạt / Cách thức đo.`)
     if (r.weight === null) errors.push(`${where}: thiếu Trọng số.`)
@@ -336,10 +409,13 @@ export async function parseStandardFile(file) {
 
   const hasSelfResults = objectives.some((o) => o.self_result !== null)
   const hasManagerResults = objectives.some((o) => o.manager_result !== null)
+  if (team && !hasSelfResults && !hasManagerResults)
+    warnings.push('Chưa có kết quả đánh giá — chỉ nhập phần đăng ký mục tiêu.')
 
   return {
     fatal: null,
-    fileName: file.name,
+    fileName,
+    sheetName,
     personName,
     identity,
     period,

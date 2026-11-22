@@ -12,7 +12,7 @@ import {
 import {
   buildStandardWorkbook,
   downloadBlob,
-  parseStandardFile,
+  parseWorkbookFile,
   standardFileName,
 } from '../lib/excel'
 import { defaultPeriod, isPeriodAllowed, loadPeriods } from '../lib/periods'
@@ -29,6 +29,7 @@ export default function ExcelImport() {
   const [period, setPeriod] = useState('')
   const [scopeUsers, setScopeUsers] = useState([])
   const [noAccount, setNoAccount] = useState([]) // [{ key, name }] nhân viên không TK mình phụ trách
+  const [fileNames, setFileNames] = useState(new Map()) // username -> tên trong file gần nhất
   const [downloadUser, setDownloadUser] = useState('')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
@@ -36,6 +37,7 @@ export default function ExcelImport() {
   const [items, setItems] = useState([]) // các file đã đọc
   const [expanded, setExpanded] = useState(null)
   const [result, setResult] = useState(null)
+  const [skipNotes, setSkipNotes] = useState([]) // sheet ẩn bị bỏ qua khi đọc file cả đội
 
   // Phạm vi được NHẬP: bản thân + cấp dưới trực tiếp (admin: tất cả)
   async function loadScopeUsers() {
@@ -70,13 +72,28 @@ export default function ExcelImport() {
     return [...m.values()].sort((a, b) => a.name.localeCompare(b.name, 'vi'))
   }
 
+  // Tên LẤY TỪ FILE gần nhất của nhân viên có tài khoản (username -> tên).
+  // Tên hiển thị ưu tiên tên trong file, chỉ dùng tên hệ thống khi chưa từng nhập file.
+  async function loadFileNames() {
+    const { data } = await supabase
+      .from('evaluations')
+      .select('username, employee_name, period')
+      .not('username', 'is', null)
+      .not('employee_name', 'is', null)
+      .order('period', { ascending: false })
+    const m = new Map()
+    for (const e of data || []) if (!m.has(e.username)) m.set(e.username, e.employee_name)
+    return m
+  }
+
   useEffect(() => {
     async function init() {
-      const [ps, users, na] = await Promise.all([loadPeriods(), loadScopeUsers(), loadNoAccount()])
+      const [ps, users, na, fn] = await Promise.all([loadPeriods(), loadScopeUsers(), loadNoAccount(), loadFileNames()])
       setPeriods(ps)
       setPeriod(defaultPeriod(ps))
       setScopeUsers(users)
       setNoAccount(na)
+      setFileNames(fn)
       setDownloadUser(username)
       setLoading(false)
     }
@@ -108,7 +125,7 @@ export default function ExcelImport() {
     const fnLooksLikeName =
       fnName && !/\d/.test(fnName) && !/kpi|danh gia|dang ky|dang ki|template|mau/.test(normalizeName(fnName))
     const name = fromCell || (fnLooksLikeName ? fnName : '')
-    const nameFrom = fromCell ? 'file' : name ? 'filename' : null
+    const nameFrom = fromCell ? 'file' : name ? (parsed.sheetName ? 'sheet' : 'filename') : null
     const m = idText.match(/\(([^()]+)\)\s*$/)
     const un = m?.[1]?.trim().toLowerCase()
     const byUn = un && scopeUsers.find((u) => u.username.toLowerCase() === un)
@@ -130,7 +147,7 @@ export default function ExcelImport() {
     if (isNa && !isAdmin) q = q.eq('manager_username', username)
     const { data: evs } = await q.limit(1)
     const ev = evs?.[0] || null
-    const name = ev?.employee_name || na?.name || u?.ho_va_ten || key
+    const name = ev?.employee_name || na?.name || fileNames.get(key) || u?.ho_va_ten || key
     let objectives = []
     if (ev) {
       const { data: objs } = await supabase
@@ -143,7 +160,10 @@ export default function ExcelImport() {
     const blob = await buildStandardWorkbook({
       personName: name,
       username: isNa ? '' : key,
-      people: [...scopeUsers, ...noAccount.map((x) => ({ username: '', ho_va_ten: x.name }))],
+      people: [
+        ...scopeUsers.map((x) => ({ ...x, ho_va_ten: fileNames.get(x.username) || x.ho_va_ten })),
+        ...noAccount.map((x) => ({ username: '', ho_va_ten: x.name })),
+      ],
       period,
       objectives,
       registrationComment: ev?.registration_comment || '',
@@ -188,21 +208,27 @@ export default function ExcelImport() {
     setBusy('parse')
     try {
       const parsedList = []
+      const notes = []
       for (const f of files) {
-        const parsed = await parseStandardFile(f)
-        const who = resolvePerson(parsed)
-        const uname = who.username
-        parsedList.push({
-          id: ++fileSeq,
-          parsed,
-          username: uname,
-          employeeName: who.employeeName,
-          nameFrom: who.nameFrom,
-          period: parsed.period || period,
-          targetStatus: parsed.fatal ? 'draft' : defaultStatus(parsed, uname),
-        })
+        // 1 file mẫu chuẩn -> 1 phiếu; file cả đội (mỗi sheet 1 người) -> nhiều phiếu
+        const { entries, skippedHidden } = await parseWorkbookFile(f)
+        if (skippedHidden.length) notes.push(`${f.name}: bỏ qua ${skippedHidden.length} sheet ẩn — ${skippedHidden.join(', ')}`)
+        for (const parsed of entries) {
+          const who = resolvePerson(parsed)
+          const uname = who.username
+          parsedList.push({
+            id: ++fileSeq,
+            parsed,
+            username: uname,
+            employeeName: who.employeeName,
+            nameFrom: who.nameFrom,
+            period: parsed.period || period,
+            targetStatus: parsed.fatal ? 'draft' : defaultStatus(parsed, uname),
+          })
+        }
       }
       setItems((prev) => [...prev, ...parsedList])
+      setSkipNotes(notes)
     } catch (err) {
       setError('Không đọc được file: ' + (err.message || err))
     } finally {
@@ -299,7 +325,7 @@ export default function ExcelImport() {
     }
     const k = itemKey(it)
     const dup = items.filter((x) => k && itemKey(x) === k && x.period === it.period)
-    if (k && dup.length > 1 && dup[0].id !== it.id) out.push('Trùng nhân viên & kỳ với file khác phía trên.')
+    if (k && dup.length > 1 && dup[0].id !== it.id) out.push('Trùng nhân viên & kỳ với phiếu khác phía trên.')
     const ev = existing[`${k}|${it.period}`]
     if (ev) {
       const self = it.username === username
@@ -369,7 +395,7 @@ export default function ExcelImport() {
       self_total: p.totals.self,
       manager_total: p.totals.manager,
       registration_comment: p.registrationComment || null,
-      source_file: p.fileName,
+      source_file: p.sheetName ? `${p.fileName} [${p.sheetName}]` : p.fileName,
       imported_at: now,
       imported_by: username,
       status: st,
@@ -391,18 +417,20 @@ export default function ExcelImport() {
     const summary = { created: 0, updated: 0, rows: 0, failed: [] }
     const done = new Set()
     for (const it of ready) {
-      const who = it.employeeName || userMap.get(it.username)?.ho_va_ten || it.username
+      const who = it.employeeName || fileNames.get(it.username) || userMap.get(it.username)?.ho_va_ten || it.username
       try {
         const r = await applyOne(it)
         r.created ? summary.created++ : summary.updated++
         summary.rows += r.rows
         done.add(it.id)
       } catch (e) {
-        summary.failed.push(`${who} (${it.parsed.fileName}): ${e.message || e}`)
+        const src = it.parsed.sheetName ? `${it.parsed.fileName} › ${it.parsed.sheetName}` : it.parsed.fileName
+        summary.failed.push(`${who} (${src}): ${e.message || e}`)
       }
     }
     setItems((prev) => prev.filter((x) => !done.has(x.id)))
     setNoAccount(await loadNoAccount())
+    setFileNames(await loadFileNames())
     setResult(summary)
     setBusy('')
   }
@@ -452,7 +480,7 @@ export default function ExcelImport() {
               <optgroup label="Có tài khoản">
                 {scopeUsers.map((u) => (
                   <option key={u.username} value={u.username}>
-                    {u.ho_va_ten || u.username}
+                    {fileNames.get(u.username) || u.ho_va_ten || u.username}
                     {u.username === username ? ' (tôi)' : ''}
                   </option>
                 ))}
@@ -495,6 +523,11 @@ export default function ExcelImport() {
           kiến/đánh giá của N+1. Kiểm tra và <b>hiển thị lỗi trước</b>, chỉ ghi khi bạn bấm Áp dụng. Dữ liệu trong file{' '}
           <b>thay thế toàn bộ</b> mục tiêu hiện có của phiếu.
         </p>
+        <p className="mb-3 text-sm text-slate-500">
+          Cũng nhận <b>file cả đội</b> (dạng file miền Bắc): mỗi sheet <i>"KPI 11 - Họ tên"</i> là phiếu của 1 người,
+          tên nhân viên lấy từ tên sheet và tự khớp tài khoản theo họ tên. Sheet tổng hợp / phụ lục và sheet ẩn được bỏ
+          qua.
+        </p>
         <input
           ref={fileRef}
           type="file"
@@ -505,6 +538,11 @@ export default function ExcelImport() {
           className="block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-4 file:py-2 file:text-sm file:font-medium file:text-slate-700 hover:file:bg-slate-200"
         />
         {busy === 'parse' && <p className="mt-2 text-sm text-slate-500">Đang đọc file...</p>}
+        {skipNotes.map((n, i) => (
+          <p key={i} className="mt-2 text-xs text-amber-700">
+            ⚠ {n}
+          </p>
+        ))}
       </section>
 
       {/* Bước 3 — xem trước */}
@@ -512,12 +550,18 @@ export default function ExcelImport() {
         <section className="mb-4 rounded-xl border border-slate-200 bg-white p-5">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h2 className="font-semibold text-slate-800">
-              3. Xem trước — {items.length} file · <span className="text-green-700">{ready.length} hợp lệ</span>
+              3. Xem trước — {items.length} phiếu · <span className="text-green-700">{ready.length} hợp lệ</span>
               {items.length - ready.length > 0 && (
                 <span className="text-red-600"> · {items.length - ready.length} có lỗi</span>
               )}
             </h2>
-            <button onClick={() => setItems([])} className="text-sm text-slate-500 hover:text-slate-700">
+            <button
+              onClick={() => {
+                setItems([])
+                setSkipNotes([])
+              }}
+              className="text-sm text-slate-500 hover:text-slate-700"
+            >
               Xoá danh sách
             </button>
           </div>
@@ -571,10 +615,10 @@ export default function ExcelImport() {
               disabled={!ready.length || busy === 'apply'}
               className="rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
             >
-              {busy === 'apply' ? 'Đang ghi...' : `✓ Áp dụng ${ready.length} file hợp lệ`}
+              {busy === 'apply' ? 'Đang ghi...' : `✓ Áp dụng ${ready.length} phiếu hợp lệ`}
             </button>
             {items.length > ready.length && (
-              <span className="text-sm text-slate-500">File có lỗi sẽ được giữ lại để sửa, không ghi.</span>
+              <span className="text-sm text-slate-500">Phiếu có lỗi sẽ được giữ lại để sửa, không ghi.</span>
             )}
           </div>
         </section>
@@ -615,6 +659,7 @@ function Field({ label, children }) {
 
 const NAME_HINTS = {
   file: ['Tên lấy từ ô NHÂN VIÊN trong file', 'text-green-700'],
+  sheet: ['Tên lấy từ tên sheet', 'text-green-700'],
   filename: ['Tên lấy từ tên file — kiểm tra lại', 'text-amber-700'],
 }
 function NameHint({ from }) {
@@ -638,9 +683,20 @@ function FileRows({ it, p, errs, ev, open, scopeUsers, periods, allowed, onToggl
             {ok ? '✓ ' : '⚠ '}
             {p.fileName}
           </div>
+          {p.sheetName && (
+            <div className="truncate text-xs text-slate-600" title={p.sheetName}>
+              Sheet: {p.sheetName}
+            </div>
+          )}
           {!p.fatal && (
             <div className="text-xs text-slate-500">
-              {p.source === 'evaluation' ? 'Đánh giá cuối tháng' : 'Chỉ Đăng ký đầu tháng'}
+              {p.source === 'evaluation'
+                ? 'Đánh giá cuối tháng'
+                : p.source === 'sheet'
+                  ? p.hasSelfResults || p.hasManagerResults
+                    ? 'Có kết quả đánh giá'
+                    : 'Chỉ đăng ký mục tiêu'
+                  : 'Chỉ Đăng ký đầu tháng'}
             </div>
           )}
         </td>
@@ -661,7 +717,8 @@ function FileRows({ it, p, errs, ev, open, scopeUsers, periods, allowed, onToggl
             <option value="">Không có tài khoản</option>
             {scopeUsers.map((u) => (
               <option key={u.username} value={u.username}>
-                TK: {u.ho_va_ten || u.username}
+                TK: {u.username}
+                {u.ho_va_ten ? ` (${u.ho_va_ten})` : ''}
               </option>
             ))}
           </select>

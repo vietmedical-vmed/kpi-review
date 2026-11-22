@@ -189,11 +189,13 @@ export default function TeamInsights() {
   const people = useMemo(() => {
     const evBy = new Map()
     for (const e of evals) evBy.set(`${personKey(e)}|${e.period}`, e)
-    // Nhân viên không tài khoản: lấy tên mới nhất từ phiếu
+    // Tên mới nhất LẤY TỪ FILE của mỗi người (cả người có tài khoản) — ưu tiên hơn tên hệ thống
     const naPeople = new Map()
+    const fileName = new Map()
     for (const e of [...evals].sort((a, b) => b.period.localeCompare(a.period))) {
-      if (e.username) continue
       const k = personKey(e)
+      if (e.employee_name && !fileName.has(k)) fileName.set(k, e.employee_name)
+      if (e.username) continue
       if (!naPeople.has(k)) naPeople.set(k, { name: e.employee_name, manager: e.manager_username })
     }
     const objBy = new Map()
@@ -217,8 +219,8 @@ export default function TeamInsights() {
         key,
         username: un,
         noAccount: !!na,
-        // Tên lấy từ file Excel nếu có, sau đó tên hệ thống
-        ho_va_ten: ev?.employee_name || u.ho_va_ten || un,
+        // Tên lấy từ file Excel (kỳ đang xem, rồi kỳ gần nhất); chỉ dùng tên hệ thống khi chưa từng nhập file
+        ho_va_ten: ev?.employee_name || fileName.get(key) || u.ho_va_ten || un,
         mien: u.mien || '',
         bu: u.bu || '',
         managerUsername: mgrName || '',
