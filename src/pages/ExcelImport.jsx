@@ -38,6 +38,8 @@ export default function ExcelImport() {
   const [expanded, setExpanded] = useState(null)
   const [result, setResult] = useState(null)
   const [skipNotes, setSkipNotes] = useState([]) // sheet ẩn bị bỏ qua khi đọc file cả đội
+  const [autoLink, setAutoLink] = useState(false) // tự gắn tài khoản theo tên — mặc định tắt
+  const [approver, setApprover] = useState('') // N+1 phụ trách phiếu không TK (admin chọn được người khác)
 
   // Phạm vi được NHẬP: bản thân + cấp dưới trực tiếp (admin: tất cả)
   async function loadScopeUsers() {
@@ -95,6 +97,7 @@ export default function ExcelImport() {
       setNoAccount(na)
       setFileNames(fn)
       setDownloadUser(username)
+      setApprover(username)
       setLoading(false)
     }
     init()
@@ -113,12 +116,14 @@ export default function ExcelImport() {
 
   /**
    * Tên nhân viên LẤY TỪ FILE (nhiều nhân viên không có tài khoản):
-   *  - Ô "NHÂN VIÊN" trong file; trống thì lấy phần đầu tên file (trước dấu "_").
-   *  - Liên kết tài khoản chỉ khi khớp chắc chắn: "(username)" trong ô, hoặc họ tên
-   *    trùng khớp 1 tài khoản trong phạm vi. Không khớp -> phiếu không tài khoản,
-   *    N+1 phụ trách = người upload.
+   *  - Ô "NHÂN VIÊN" trong file; trống thì lấy tên sheet / phần đầu tên file.
+   *  - MẶC ĐỊNH KHÔNG gắn tài khoản: phiếu thuộc "Người duyệt (N+1)" chọn khi upload,
+   *    N+1 + quản lý cấp trên N+1 xem, N+1 chấm/duyệt — không phụ thuộc sơ đồ tổ chức.
+   *  - Bật "Tự gắn tài khoản": gắn khi khớp chắc chắn ("(username)" trong ô, hoặc họ
+   *    tên trùng 1 tài khoản trong phạm vi). Phiếu có tài khoản thì quyền theo sơ đồ
+   *    tổ chức, nhân viên tự đăng nhập được.
    */
-  function resolvePerson(parsed) {
+  function resolvePerson(parsed, link = autoLink) {
     const idText = (parsed.identity?.person || '').trim()
     const fromCell = idText.replace(/\s*\([^()]*\)\s*$/, '').trim()
     const fnName = (parsed.personName || '').trim()
@@ -130,7 +135,7 @@ export default function ExcelImport() {
     const un = m?.[1]?.trim().toLowerCase()
     const byUn = un && scopeUsers.find((u) => u.username.toLowerCase() === un)
     const byName = name && userByName.get(normalizeName(name))
-    const acc = byUn || byName || null
+    const acc = link ? byUn || byName || null : null
     return { employeeName: name, nameFrom, username: acc?.username || '' }
   }
   const periodMap = useMemo(() => new Map(periods.map((p) => [p.period, p])), [periods])
@@ -220,6 +225,7 @@ export default function ExcelImport() {
             id: ++fileSeq,
             parsed,
             username: uname,
+            approver: approver || username,
             employeeName: who.employeeName,
             nameFrom: who.nameFrom,
             period: parsed.period || period,
@@ -237,12 +243,24 @@ export default function ExcelImport() {
     }
   }
 
-  // Khoá nhận diện 1 dòng: tài khoản, hoặc tên chuẩn hoá (phiếu không tài khoản)
+  // Khoá nhận diện 1 dòng: tài khoản, hoặc tên chuẩn hoá + N+1 phụ trách (phiếu không tài khoản)
   const itemKey = (it) =>
-    it.username ? it.username : it.employeeName ? `name:${normalizeName(it.employeeName)}` : ''
+    it.username
+      ? it.username
+      : it.employeeName
+        ? `name:${normalizeName(it.employeeName)}@${it.approver || username}`
+        : ''
+
+  // Phiếu hiện có của 1 dòng. Admin: nếu N+1 chưa có phiếu của người này thì lấy phiếu
+  // cùng tên/kỳ đang nằm ở N+1 khác (khi áp dụng sẽ chuyển sang N+1 mới).
+  function existingOf(it, map = existing) {
+    const exact = map[`${itemKey(it)}|${it.period}`]
+    if (exact || it.username || !isAdmin || !it.employeeName) return exact
+    return map[`name:${normalizeName(it.employeeName)}@*|${it.period}`]
+  }
 
   // Lấy trạng thái phiếu hiện có cho các cặp (người, kỳ) trong danh sách
-  const [existing, setExisting] = useState({}) // key "personKey|period" -> evaluation
+  const [existing, setExisting] = useState({}) // key "itemKey|period" -> evaluation
   useEffect(() => {
     const list = items.filter((it) => itemKey(it) && it.period)
     if (!list.length) return
@@ -252,7 +270,9 @@ export default function ExcelImport() {
       for (const it of list) (byPeriod[it.period] ||= []).push(it)
       for (const [p, its] of Object.entries(byPeriod)) {
         const accs = [...new Set(its.filter((x) => x.username).map((x) => x.username))]
-        const keys = [...new Set(its.filter((x) => !x.username).map((x) => normalizeName(x.employeeName)))]
+        const na = its.filter((x) => !x.username)
+        const keys = [...new Set(na.map((x) => normalizeName(x.employeeName)))]
+        const mgrs = [...new Set(na.map((x) => x.approver || username))]
         if (accs.length) {
           const { data } = await supabase
             .from('evaluations')
@@ -268,9 +288,12 @@ export default function ExcelImport() {
             .eq('period', p)
             .is('username', null)
             .in('employee_key', keys)
-            .eq('manager_username', username)
+          if (!isAdmin) q = q.in('manager_username', mgrs)
           const { data } = await q
-          for (const ev of data || []) next[`name:${ev.employee_key}|${p}`] = ev
+          for (const ev of data || []) {
+            next[`name:${ev.employee_key}@${ev.manager_username}|${p}`] = ev
+            next[`name:${ev.employee_key}@*|${p}`] ||= ev
+          }
         }
       }
       setExisting(next)
@@ -278,7 +301,7 @@ export default function ExcelImport() {
       setItems((prev) => {
         let changed = false
         const out = prev.map((it) => {
-          const ev = next[`${itemKey(it)}|${it.period}`]
+          const ev = existingOf(it, next)
           if (!ev || it.statusTouched || it.parsed.fatal) return it
           const cur = STATUS_ORDER.indexOf(it.targetStatus)
           const has = STATUS_ORDER.indexOf(ev.status)
@@ -303,11 +326,31 @@ export default function ExcelImport() {
         if (changes.employeeName !== undefined) next.nameFrom = null
         if (changes.username !== undefined) {
           next.statusTouched = false
+          next.linkTouched = true
           if (!it.parsed.fatal) next.targetStatus = defaultStatus(it.parsed, changes.username)
         }
         return next
       })
     )
+  }
+
+  // Bật/tắt tự gắn tài khoản: tính lại cho các dòng chưa chọn tay
+  function toggleAutoLink(on) {
+    setAutoLink(on)
+    setItems((prev) =>
+      prev.map((it) => {
+        if (it.linkTouched || it.parsed.fatal) return it
+        const un = resolvePerson(it.parsed, on).username
+        if (un === it.username) return it
+        return { ...it, username: un, statusTouched: false, targetStatus: defaultStatus(it.parsed, un) }
+      })
+    )
+  }
+
+  // Admin đổi Người duyệt chung: áp cho mọi dòng không tài khoản
+  function changeApprover(un) {
+    setApprover(un)
+    setItems((prev) => prev.map((it) => ({ ...it, approver: un })))
   }
 
   // Kiểm tra từng file -> danh sách lỗi chặn
@@ -326,7 +369,8 @@ export default function ExcelImport() {
     const k = itemKey(it)
     const dup = items.filter((x) => k && itemKey(x) === k && x.period === it.period)
     if (k && dup.length > 1 && dup[0].id !== it.id) out.push('Trùng nhân viên & kỳ với phiếu khác phía trên.')
-    const ev = existing[`${k}|${it.period}`]
+    if (!it.username && !it.approver) out.push('Chưa chọn Người duyệt (N+1).')
+    const ev = existingOf(it)
     if (ev) {
       const self = it.username === username
       if (ev.status === 'approved' && !isAdmin) out.push('Phiếu đã Chốt — chỉ admin được ghi đè.')
@@ -350,17 +394,35 @@ export default function ExcelImport() {
     const p = it.parsed
     const name = (it.employeeName || '').trim()
     const key = normalizeName(name)
+    const mgr = isAdmin ? it.approver || username : username // chỉ admin được giao phiếu cho N+1 khác
     let find = supabase.from('evaluations').select('*').eq('period', it.period)
     find = it.username
       ? find.eq('username', it.username)
-      : find.is('username', null).eq('employee_key', key).eq('manager_username', username)
+      : find.is('username', null).eq('employee_key', key).eq('manager_username', mgr)
     let { data: ev, error: findErr } = await find.maybeSingle()
     if (findErr) throw findErr
+    let reassign = false
+    if (!ev && !it.username && isAdmin) {
+      // Admin: phiếu cùng tên/kỳ đang ở N+1 khác -> chuyển sang N+1 đã chọn
+      const { data: other, error: e2 } = await supabase
+        .from('evaluations')
+        .select('*')
+        .eq('period', it.period)
+        .is('username', null)
+        .eq('employee_key', key)
+        .order('created_at')
+        .limit(1)
+      if (e2) throw e2
+      if (other?.[0]) {
+        ev = other[0]
+        reassign = ev.manager_username !== mgr
+      }
+    }
     let created = false
     if (!ev) {
       const row = it.username
         ? { username: it.username, period: it.period, status: 'draft', employee_name: name || null }
-        : { username: null, employee_name: name, employee_key: key, manager_username: username, period: it.period, status: 'draft' }
+        : { username: null, employee_name: name, employee_key: key, manager_username: mgr, period: it.period, status: 'draft' }
       const { data, error } = await supabase
         .from('evaluations')
         .insert(row)
@@ -401,6 +463,7 @@ export default function ExcelImport() {
       status: st,
     }
     if (name) upd.employee_name = name
+    if (reassign) upd.manager_username = mgr
     if (p.managerComment) upd.manager_comment = p.managerComment
     const rank = STATUS_ORDER.indexOf(st)
     if (rank >= 1 && !ev.submitted_at) upd.submitted_at = now
@@ -525,9 +588,32 @@ export default function ExcelImport() {
         </p>
         <p className="mb-3 text-sm text-slate-500">
           Cũng nhận <b>file cả đội</b> (dạng file miền Bắc): mỗi sheet <i>"KPI 11 - Họ tên"</i> là phiếu của 1 người,
-          tên nhân viên lấy từ tên sheet và tự khớp tài khoản theo họ tên. Sheet tổng hợp / phụ lục và sheet ẩn được bỏ
-          qua.
+          tên nhân viên lấy từ tên sheet. Sheet tổng hợp / phụ lục và sheet ẩn được bỏ qua.
         </p>
+        <div className="mb-3 flex flex-wrap items-end gap-4 rounded-lg bg-slate-50 p-3">
+          <Field label="Người duyệt (N+1) của các phiếu">
+            {isAdmin ? (
+              <select value={approver} onChange={(e) => changeApprover(e.target.value)} className="input min-w-[16rem]">
+                {scopeUsers.map((u) => (
+                  <option key={u.username} value={u.username}>
+                    {u.ho_va_ten || u.username} ({u.username}){u.username === username ? ' — tôi' : ''}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="py-2 text-sm font-medium text-slate-700">Bạn ({username})</div>
+            )}
+          </Field>
+          <label className="flex items-center gap-2 pb-2 text-sm text-slate-700">
+            <input type="checkbox" checked={autoLink} onChange={(e) => toggleAutoLink(e.target.checked)} />
+            Tự gắn tài khoản khi trùng họ tên
+          </label>
+          <p className="w-full text-xs text-slate-500">
+            Mặc định phiếu <b>không gắn tài khoản</b>: Người duyệt (N+1) và quản lý cấp trên của N+1 xem được trong Báo cáo,
+            N+1 chấm & duyệt. Chỉ gắn tài khoản (tự động hoặc chọn từng dòng) cho nhân viên cần tự đăng nhập — khi đó quyền
+            xem/duyệt theo Sơ đồ tổ chức.
+          </p>
+        </div>
         <input
           ref={fileRef}
           type="file"
@@ -586,7 +672,7 @@ export default function ExcelImport() {
                 {items.map((it) => {
                   const p = it.parsed
                   const errs = blockers(it)
-                  const ev = existing[`${itemKey(it)}|${it.period}`]
+                  const ev = existingOf(it)
                   const open = expanded === it.id
                   return (
                     <FileRows
@@ -597,6 +683,7 @@ export default function ExcelImport() {
                       ev={ev}
                       open={open}
                       scopeUsers={scopeUsers}
+                      isAdmin={isAdmin}
                       periods={periods}
                       allowed={allowedStatuses(it)}
                       onToggle={() => setExpanded(open ? null : it.id)}
@@ -672,7 +759,7 @@ function pct(v) {
   return v === null || v === undefined ? '—' : `${v}%`
 }
 
-function FileRows({ it, p, errs, ev, open, scopeUsers, periods, allowed, onToggle, onChange, onRemove }) {
+function FileRows({ it, p, errs, ev, open, scopeUsers, isAdmin, periods, allowed, onToggle, onChange, onRemove }) {
   const ok = errs.length === 0
   const grade = p.fatal || !p.hasSelfResults ? null : gradeOf(p.totals.final)
   return (
@@ -722,6 +809,20 @@ function FileRows({ it, p, errs, ev, open, scopeUsers, periods, allowed, onToggl
               </option>
             ))}
           </select>
+          {!it.username && isAdmin && (
+            <select
+              value={it.approver}
+              onChange={(e) => onChange({ approver: e.target.value })}
+              className="input mt-1 w-52 py-1 text-xs"
+              title="Người duyệt (N+1) của phiếu này"
+            >
+              {scopeUsers.map((u) => (
+                <option key={u.username} value={u.username}>
+                  N+1: {u.ho_va_ten || u.username}
+                </option>
+              ))}
+            </select>
+          )}
         </td>
         <td className="px-3 py-2">
           <select value={it.period} onChange={(e) => onChange({ period: e.target.value })} className="input">
