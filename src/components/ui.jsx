@@ -42,13 +42,13 @@ export function Alert({ kind = 'error', children }) {
 export const pct = (v) => (v === null || v === undefined || v === '' ? '—' : `${v}%`)
 
 // Chọn người duyệt (N+1): nhóm quản lý lên trước
-export function ApproverSelect({ value, onChange, users, managerSet, me, className = 'input' }) {
+export function ApproverSelect({ value, onChange, users, managerSet, me, className = 'input', emptyLabel = '— Chọn người duyệt —' }) {
   const managers = users.filter((u) => managerSet.has(u.username))
   const others = users.filter((u) => !managerSet.has(u.username))
   const label = (u) => `${u.ho_va_ten || u.username} (${u.username})${u.username === me ? ' — tôi' : ''}`
   return (
     <select value={value || ''} onChange={(e) => onChange(e.target.value)} className={className}>
-      <option value="">— Chọn người duyệt —</option>
+      <option value="">{emptyLabel}</option>
       {managers.length > 0 && (
         <optgroup label="Quản lý">
           {managers.map((u) => (

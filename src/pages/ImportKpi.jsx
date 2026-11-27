@@ -8,7 +8,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
-import { formatPeriod, gradeOf, normalizeName, isApproved, evalPermissions } from '../lib/constants'
+import { DEFAULT_APPROVER, formatPeriod, gradeOf, normalizeName, isApproved, evalPermissions } from '../lib/constants'
 import {
   buildStandardWorkbook,
   downloadBlob,
@@ -22,8 +22,10 @@ import { Alert, ApproverSelect, Field, GradeBadge, StatusBadge, pct } from '../c
 import Spinner from '../components/Spinner'
 
 const MAX_STORE_BYTES = 8 * 1024 * 1024 // file lớn hơn không lưu bản gốc (xuất theo mẫu chuẩn)
-const LAST_APPROVER = 'kpi_last_approver'
 let seq = 0
+
+// Người duyệt thực tế của 1 dòng: không chọn thì là người duyệt mặc định
+const approverOf = (it) => it.approver || DEFAULT_APPROVER
 
 // Tên nhân viên lấy từ file: ô NHÂN VIÊN > tên sheet > phần đầu tên file
 function nameFromFile(parsed) {
@@ -37,7 +39,7 @@ function nameFromFile(parsed) {
 }
 
 export default function ImportKpi() {
-  const { username, isAdmin, canUpload, profile } = useAuth()
+  const { username, isAdmin, canUpload } = useAuth()
   const fileRef = useRef(null)
   const filesRef = useRef(new Map()) // fileKey -> File
 
@@ -73,10 +75,7 @@ export default function ImportKpi() {
       setPeriod(defaultPeriod(ps))
       setPeople(pp)
       setKnown(kn)
-      const last = localStorage.getItem(LAST_APPROVER)
-      setApprover(
-        (last && pp.userMap.has(last) && last) || profile?.manager_username || (pp.managerSet.has(username) ? username : '')
-      )
+      setApprover(DEFAULT_APPROVER)
       setLoading(false)
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -151,7 +150,7 @@ export default function ImportKpi() {
   // Phiếu hiện có sẽ bị cập nhật: ưu tiên phiếu cùng người duyệt
   function existingOf(it, map = existing) {
     const list = map[`${normalizeName(it.employeeName)}|${it.period}`] || []
-    return list.find((e) => e.manager_username === it.approver) || list[0] || null
+    return list.find((e) => e.manager_username === approverOf(it)) || list[0] || null
   }
 
   function updateItem(id, changes) {
@@ -181,7 +180,6 @@ export default function ImportKpi() {
     if (p.fatal) return [p.fatal]
     const out = [...p.errors]
     if (!it.employeeName?.trim()) out.push('Chưa có tên nhân viên — điền ô NHÂN VIÊN trong file hoặc nhập tay.')
-    if (!it.approver) out.push('Chưa chọn Người duyệt (N+1).')
     if (!it.period) out.push('Chưa xác định kỳ đánh giá.')
     else if (!isPeriodAllowed(it.period)) out.push(`Kỳ ${formatPeriod(it.period)} nằm ngoài khoảng cho phép.`)
     else if (periodMap.get(it.period)?.is_open === false && !isAdmin) out.push(`Kỳ ${formatPeriod(it.period)} đã bị khoá.`)
@@ -230,7 +228,8 @@ export default function ImportKpi() {
       .is('username', null)
       .eq('employee_key', key)
     if (findErr) throw findErr
-    let ev = (found || []).find((e) => e.manager_username === it.approver) || found?.[0] || null
+    const approverUn = approverOf(it)
+    let ev = (found || []).find((e) => e.manager_username === approverUn) || found?.[0] || null
     if (ev && isApproved(ev)) throw new Error('phiếu đã được duyệt')
 
     const fileId = await storeFile(it.fileKey, fileCache)
@@ -243,7 +242,7 @@ export default function ImportKpi() {
           username: null,
           employee_name: name,
           employee_key: key,
-          manager_username: it.approver,
+          manager_username: approverUn,
           period: it.period,
           status: 'submitted',
           imported_by: username,
@@ -277,7 +276,7 @@ export default function ImportKpi() {
       .update({
         employee_name: name,
         employee_key: key,
-        manager_username: it.approver,
+        manager_username: approverUn,
         status: 'submitted',
         self_total: p.totals.self,
         manager_total: p.totals.manager,
@@ -321,7 +320,6 @@ export default function ImportKpi() {
         .eq('source_file_id', fid)
       if (!count) await supabase.from('kpi_files').delete().eq('id', fid)
     }
-    if (approver) localStorage.setItem(LAST_APPROVER, approver)
     setItems((prev) => prev.filter((x) => !done.has(x.id)))
     setKnown(await loadKnown())
     setResult(summary)
@@ -354,7 +352,7 @@ export default function ImportKpi() {
 
       <section className="mb-4 rounded-xl border border-slate-200 bg-white p-5">
         <div className="mb-4 flex flex-wrap items-end gap-4">
-          <Field label="Người duyệt (N+1) — áp cho các file chọn tiếp theo">
+          <Field label="Người duyệt (N+1) — áp cho các file chọn tiếp theo; để trống = Quản lý Khối Ngoại khoa">
             <ApproverSelect
               value={approver}
               onChange={changeApprover}
@@ -362,6 +360,7 @@ export default function ImportKpi() {
               managerSet={people.managerSet}
               me={username}
               className="input min-w-[18rem]"
+              emptyLabel="— Mặc định: Quản lý Khối Ngoại khoa —"
             />
           </Field>
           <Field label="Kỳ mặc định (khi file không ghi kỳ)">
@@ -561,7 +560,8 @@ function PreviewRows({ it, errs, ev, check, open, periods, people, me, onToggle,
             users={people.users}
             managerSet={people.managerSet}
             me={me}
-            className={`input w-52 text-xs ${it.approver ? '' : 'border-red-400'}`}
+            className="input w-52 text-xs"
+            emptyLabel="— Mặc định: QL Khối Ngoại khoa —"
           />
         </td>
         <td className="px-3 py-2 text-right tabular-nums">{p.fatal ? '—' : p.objectives.length}</td>
@@ -574,7 +574,7 @@ function PreviewRows({ it, errs, ev, check, open, periods, people, me, onToggle,
               <StatusBadge status={ev.status} />
               <div className="mt-0.5 text-[11px] text-slate-500">
                 {isApproved(ev) ? 'Đã khoá' : 'Sẽ cập nhật'}
-                {ev.manager_username !== it.approver ? ` · đang ở ${userLabel(people.userMap, ev.manager_username)}` : ''}
+                {ev.manager_username !== approverOf(it) ? ` · đang ở ${userLabel(people.userMap, ev.manager_username)}` : ''}
               </div>
             </div>
           ) : (

@@ -35,6 +35,9 @@ export const STATUS_COLORS = {
 
 export const isApproved = (ev) => ev?.status === 'approved'
 
+// Người duyệt mặc định khi người nhập không chọn: Quản lý Khối Ngoại khoa
+export const DEFAULT_APPROVER = 'manager_knk'
+
 /**
  * Quyền trên 1 phiếu (khớp RLS kpi_can_edit_eval ở DB):
  *  - approve: người duyệt (manager_username) hoặc admin; phiếu gắn TK cũ: QL trực tiếp
