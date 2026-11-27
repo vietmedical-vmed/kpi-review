@@ -331,19 +331,19 @@ export default function EvaluationDetail() {
             {rows.map((r, i) => (
               <tr key={r.id} className="align-top">
                 <td className="px-2 py-2 text-slate-500">{i + 1}</td>
-                <td className="px-2 py-2">
+                <td className="h-px px-2 py-2">
                   <Cell value={r.name} edit={canEdit} onChange={(v) => updateRow(r.id, 'name', v)} />
                 </td>
-                <td className="px-2 py-2">
+                <td className="h-px px-2 py-2">
                   <Cell value={r.target} edit={canEdit} onChange={(v) => updateRow(r.id, 'target', v)} />
                 </td>
-                <td className="px-2 py-2">
+                <td className="h-px px-2 py-2">
                   <Cell value={r.measure_method} edit={canEdit} onChange={(v) => updateRow(r.id, 'measure_method', v)} />
                 </td>
                 <td className="px-2 py-2 text-right">
                   <NumCell value={r.weight} edit={canEdit} onChange={(v) => updateRow(r.id, 'weight', v)} />
                 </td>
-                <td className="px-2 py-2">
+                <td className="h-px px-2 py-2">
                   <Cell value={r.reference_doc} edit={canEdit} onChange={(v) => updateRow(r.id, 'reference_doc', v)} />
                 </td>
                 <td className="px-2 py-2 text-right">
@@ -466,33 +466,48 @@ function Tile({ label, value, sub, strong }) {
 
 function Comment({ label, value, edit, onChange }) {
   return (
-    <div>
+    <div className="flex flex-col">
       <label className="mb-1 block text-sm font-medium text-slate-700">{label}</label>
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={!edit}
-        rows={3}
-        className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50"
-      />
+      {edit ? (
+        <AutoTextarea
+          value={value}
+          onChange={onChange}
+          minRows={3}
+          className="block w-full flex-1 resize-none overflow-hidden rounded-md border border-slate-300 px-3 py-2 text-sm leading-6"
+        />
+      ) : (
+        <div className="min-h-[4.5rem] flex-1 whitespace-pre-wrap break-words rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+          {value || '—'}
+        </div>
+      )}
     </div>
   )
 }
 
 // Ô chữ hiển thị HẾT nội dung: chỉ đọc -> xuống dòng đầy đủ; sửa được -> textarea tự
-// giãn chiều cao theo nội dung (không bị cắt, không cần cuộn trong ô).
+// giãn theo nội dung (không bị cắt, không cần cuộn trong ô). Các ô cùng dòng cao bằng
+// ô dài nhất: textarea giữ min-height = nội dung của nó, còn height 100% của ô bảng
+// (td có h-px: mẹo để % chiều cao trong ô bảng có hiệu lực) nên giãn theo ô cao nhất.
 function Cell({ value, edit, onChange }) {
   if (!edit) return <div className="whitespace-pre-wrap break-words text-slate-700">{value || '—'}</div>
   return <AutoTextarea value={value || ''} onChange={onChange} />
 }
 
-function AutoTextarea({ value, onChange }) {
+function AutoTextarea({
+  value,
+  onChange,
+  minRows = 1,
+  className = 'block h-full w-full resize-none overflow-hidden rounded border border-slate-300 px-1.5 py-1 text-xs leading-5',
+}) {
   const ref = useRef(null)
   const fit = () => {
     const el = ref.current
     if (!el) return
+    // Đo chiều cao nội dung thật (bỏ kéo giãn), rồi trả lại cho CSS (h-full / flex-1)
+    el.style.minHeight = '0'
     el.style.height = 'auto'
-    el.style.height = `${el.scrollHeight + 2}px`
+    el.style.minHeight = `${el.scrollHeight + 2}px`
+    el.style.height = ''
   }
   useLayoutEffect(fit, [value])
   useEffect(() => {
@@ -503,9 +518,9 @@ function AutoTextarea({ value, onChange }) {
     <textarea
       ref={ref}
       value={value}
-      rows={1}
+      rows={minRows}
       onChange={(e) => onChange(e.target.value)}
-      className="block w-full resize-none overflow-hidden rounded border border-slate-300 px-1.5 py-1 text-xs leading-5"
+      className={className}
     />
   )
 }
