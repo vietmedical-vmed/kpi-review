@@ -45,6 +45,8 @@ export function AuthProvider({ children }) {
     // Admin KPI: bật cờ trong kpi_profiles HOẶC là admin của DA (khớp kpi_is_admin() ở DB)
     const isAdmin = !!kp?.is_admin || userRow?.da_role === 'admin'
     const isManager = isAdmin || (reportsCount || 0) > 0 || (noAccCount || 0) > 0
+    // Quyền nhập KPI từ Excel: admin cấp cho một vài user (kpi_profiles.can_upload)
+    const canUpload = isAdmin || !!kp?.can_upload
     setProfile({
       username: uname,
       ho_va_ten: userRow?.ho_va_ten || uname,
@@ -54,6 +56,7 @@ export function AuthProvider({ children }) {
       manager_username: kp?.manager_username || null,
       is_admin: isAdmin,
       is_manager: isManager,
+      can_upload: canUpload,
     })
   }
 
@@ -105,6 +108,7 @@ export function AuthProvider({ children }) {
     loading,
     isAdmin: !!profile?.is_admin,
     isManager: !!profile?.is_manager,
+    canUpload: !!profile?.can_upload,
     signIn,
     signOut,
     reloadProfile: () => loadProfile(username),

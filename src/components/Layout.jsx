@@ -26,7 +26,7 @@ function navClass({ isActive }) {
 }
 
 export default function Layout() {
-  const { profile, isManager, isAdmin, signOut } = useAuth()
+  const { profile, isManager, isAdmin, canUpload, signOut } = useAuth()
   const navigate = useNavigate()
   const badge = roleInfo(profile)
 
@@ -74,11 +74,9 @@ export default function Layout() {
             </div>
           </div>
           <nav className="flex items-center gap-5 md:gap-6 mt-3 overflow-x-auto overflow-y-hidden">
-            <NavLink to="/" end className={navClass}>Tổng quan</NavLink>
-            <NavLink to="/danh-gia" className={navClass}>Phiếu của tôi</NavLink>
-            <NavLink to="/excel" className={navClass}>Nhập Excel</NavLink>
-            {isManager && <NavLink to="/duyet" className={navClass}>Duyệt KPI</NavLink>}
-            {isManager && <NavLink to="/bao-cao" className={navClass}>Báo cáo quản lý</NavLink>}
+            {canUpload && <NavLink to="/nhap" className={navClass}>1. Nhập KPI</NavLink>}
+            <NavLink to="/phieu" className={navClass}>{canUpload ? '2. Phiếu & duyệt' : 'Phiếu & duyệt'}</NavLink>
+            {isManager && <NavLink to="/bao-cao" className={navClass}>Báo cáo</NavLink>}
             {isAdmin && <NavLink to="/quan-tri" className={navClass}>Quản trị</NavLink>}
           </nav>
         </div>

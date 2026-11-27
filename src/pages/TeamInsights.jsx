@@ -30,9 +30,7 @@ const NEG = '#e34948'
 const CRITICAL = '#d03b3b'
 const STAGES = [
   { key: 'none', label: 'Chưa có phiếu', color: '#d6d5d0' },
-  { key: 'draft', label: STATUS_LABELS.draft, color: '#b7d3f6' },
-  { key: 'submitted', label: STATUS_LABELS.submitted, color: '#6da7ec' },
-  { key: 'reviewed', label: STATUS_LABELS.reviewed, color: '#2a78d6' },
+  { key: 'submitted', label: STATUS_LABELS.submitted, color: '#86b6ef' },
   { key: 'approved', label: STATUS_LABELS.approved, color: '#184f95' },
 ]
 const BINS = [
@@ -211,9 +209,9 @@ export default function TeamInsights() {
       const u = na ? { ho_va_ten: na.name } : userMap.get(un) || { username: un }
       const ev = evBy.get(`${key}|${period}`) || null
       const pe = evBy.get(`${key}|${prev}`) || null
-      const done = ev && ev.status !== 'draft'
+      const done = !!ev
       const fin = done ? finalScore(ev) : null
-      const reviewed = ev && (ev.status === 'reviewed' || ev.status === 'approved') && Number(ev.manager_total) > 0
+      const reviewed = !!ev && Number(ev.manager_total) > 0
       const mgrName = na ? na.manager : managerOf.get(un)
       return {
         key,
@@ -226,14 +224,14 @@ export default function TeamInsights() {
         managerUsername: mgrName || '',
         manager: userMap.get(mgrName)?.ho_va_ten || mgrName || '',
         evaluation: ev,
-        stage: ev ? ev.status : 'none',
+        stage: ev ? (ev.status === 'approved' ? 'approved' : 'submitted') : 'none',
         objectives: ev ? objBy.get(ev.id) || [] : [],
         self: done ? Number(ev.self_total) : null,
         mgr: reviewed ? Number(ev.manager_total) : null,
         gap: reviewed ? round2(Number(ev.manager_total) - Number(ev.self_total)) : null,
         final: fin,
         grade: done ? gradeOf(fin) : null,
-        prevFinal: pe && pe.status !== 'draft' ? finalScore(pe) : null,
+        prevFinal: pe ? finalScore(pe) : null,
       }
     })
   }, [scopeNames, userMap, managerOf, evals, objectives, period])
@@ -350,7 +348,7 @@ export default function TeamInsights() {
       ...p,
       cells: trendPeriods.map((tp) => {
         const e = evBy.get(`${p.key}|${tp}`)
-        return e && e.status !== 'draft' ? { score: finalScore(e), id: e.id, status: e.status } : null
+        return e ? { score: finalScore(e), id: e.id, status: e.status } : null
       }),
     }))
     const avgRow = trendPeriods.map((_, i) => avg(rows.map((r) => r.cells[i]?.score).filter((x) => x !== undefined && x !== null)))
@@ -468,7 +466,7 @@ export default function TeamInsights() {
               value={`${kpis.submitted}/${kpis.n}`}
               sub={`${Math.round((kpis.submitted / kpis.n) * 100)}% hoàn thành`}
             />
-            <Tile label="Chờ duyệt" value={kpis.pending} sub="Đã gửi, N+1 chưa chấm — bấm để lọc" onClick={() => setStatusFilter('submitted')} />
+            <Tile label="Chờ duyệt" value={kpis.pending} sub="Đã nhập, người duyệt chưa duyệt — bấm để lọc" onClick={() => setStatusFilter('submitted')} />
             <Tile
               label="Điểm TB cuối cùng"
               value={kpis.avgFinal === null ? '—' : `${kpis.avgFinal}%`}
@@ -604,7 +602,7 @@ export default function TeamInsights() {
             </Card>
 
             {/* Chênh lệch N vs N+1 */}
-            <Card title="Chênh lệch: N+1 chấm so với tự đánh giá" sub="Điểm N+1 − điểm N (chỉ phiếu N+1 đã chấm). Âm = nhân viên tự đánh giá cao hơn quản lý">
+            <Card title="Chênh lệch: N+1 chấm so với tự đánh giá" sub="Điểm N+1 − điểm N (chỉ phiếu có KQ của N+1). Âm = nhân viên tự đánh giá cao hơn quản lý">
               {gaps.length === 0 ? (
                 <p className="py-6 text-center text-sm text-slate-400">Chưa có phiếu nào N+1 chấm khác tự đánh giá.</p>
               ) : (
@@ -715,7 +713,7 @@ export default function TeamInsights() {
                         c ? (
                           <td
                             key={i}
-                            onClick={() => navigate(`/danh-gia/${c.id}`)}
+                            onClick={() => navigate(`/phieu/${c.id}`)}
                             className="cursor-pointer whitespace-nowrap rounded px-2 py-1.5 text-center tabular-nums"
                             style={{ background: seqColor(c.score), color: c.score >= 85 ? '#fff' : '#0b0b0b' }}
                             {...bindTip(`${r.ho_va_ten} · ${formatPeriod(trendPeriods[i])}: ${c.score}% — ${gradeOf(c.score)} (${STATUS_LABELS[c.status]})`)}
@@ -814,10 +812,10 @@ export default function TeamInsights() {
                         <td className="px-3 py-2 text-right">
                           {p.evaluation && (
                             <button
-                              onClick={() => navigate(`/danh-gia/${p.evaluation.id}`)}
+                              onClick={() => navigate(`/phieu/${p.evaluation.id}`)}
                               className="rounded-md border border-slate-300 px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
                             >
-                              {p.stage === 'submitted' && p.managerUsername === username ? 'Chấm điểm' : 'Xem'}
+                              {p.stage === 'submitted' && (p.managerUsername === username || isAdmin) ? 'Duyệt' : 'Xem'}
                             </button>
                           )}
                         </td>

@@ -12,9 +12,20 @@ Web app đánh giá KPI cho team 20–30 người. Nhân viên **tự chấm** �
 ## Kiến trúc & luồng đánh giá
 
 ```
-Nhân viên tạo phiếu (Nháp) → nhập mục tiêu + tự chấm → Gửi duyệt
-        → Quản lý duyệt, chấm điểm → Chốt kết quả (Đã chốt)
+1. Nhập KPI   (người được cấp quyền nhập / admin)
+   upload file Excel cho 1 hoặc nhiều người → xem trước (tên lấy từ file hoặc nhập tay,
+   kỳ, người duyệt, số liệu, lỗi) → Xác nhận nhập → phiếu "Chờ duyệt"
+   Người nhập còn sửa được tới khi phiếu được duyệt.
+2. Phiếu & duyệt   (người duyệt N+1 / admin)
+   xem, điều chỉnh thông tin → Duyệt (khoá phiếu) · Bỏ duyệt để mở lại
+3. Xuất Excel
+   ghi số liệu mới nhất vào CHÍNH file đã upload (giữ định dạng, công thức, sheet phụ);
+   phiếu không có file gốc xuất theo mẫu chuẩn "Đăng kí & đánh giá KPI tháng"
 ```
+
+Phiếu **không gắn tài khoản** nhân viên: nhận diện bằng họ tên (chuẩn hoá) + kỳ + người duyệt.
+Quyền nhập cấp ở **Quản trị → Nhân sự & phân quyền → Quyền nhập** (`kpi_profiles.can_upload`).
+Migration: `supabase/migrations/20261127000000_upload_review_flow.sql` (chạy trước khi deploy frontend).
 
 **Đăng nhập dùng chung tài khoản DA:**
 
@@ -119,35 +130,17 @@ git push -u origin main
 
 ---
 
-## Nhập KPI hàng loạt bằng Excel
+## Nhập KPI từ Excel
 
-Trang **Nhập Excel** cho phép tải template, điền nhiều người trong 1 file rồi upload lại.
+Trang **1. Nhập KPI** nhận 2 dạng file (chọn được nhiều file, kéo thả được):
 
-**Phạm vi** bám theo phân quyền: nhân viên → phiếu mình; quản lý → thêm nhân viên cấp dưới;
-admin → tất cả. Ai chưa có phiếu trong kỳ sẽ được **tự tạo phiếu Nháp**.
+- **Mẫu chuẩn** "Đăng kí & đánh giá KPI tháng": 2 sheet Đăng ký đầu tháng / Đánh giá cuối tháng, 1 người/file.
+- **File cả đội**: mỗi sheet `KPI 11 - Họ tên` là 1 người; sheet tổng hợp / phụ lục / sheet ẩn bị bỏ qua.
 
-**Chống điền sai — 2 lớp:**
-
-*Lớp 1 — chặn ngay trong Excel:*
-- Username & Nhóm mục tiêu: **dropdown**, không gõ tự do
-- Trọng số: chỉ nhận số `0 < x ≤ 100`; Kết quả: `0 ≤ x ≤ 100`
-- Cột **Hệ số kết quả** là công thức, **khoá không cho sửa**; sheet được protect
-- Sheet **KiemTra**: tổng trọng số từng người (SUMIF), **tô đỏ khi ≠ 100**
-- Sheet ẩn `_meta`: marker + version + kỳ → chống nộp nhầm kỳ / dùng template cũ
-
-*Lớp 2 — kiểm tra khi upload:*
-- Đúng template & đúng version, đúng kỳ
-- Username phải nằm trong phạm vi quyền; Nhóm phải hợp lệ; các trường bắt buộc không trống
-- Tổng trọng số mỗi người = 100 (±0.01); tối đa 20 dòng/người
-- Chuẩn hoá số: nhận cả `40,5` và `40.5`; ô lỡ định dạng `%` (0.4) → 40
-- Chỉ ghi vào phiếu **đang Nháp**; **xem trước + liệt kê lỗi** trước khi ghi
-- RLS ở database là chốt chặn cuối
-
-> ⚠️ Lưu ý về chuẩn hoá `%`: giá trị trong khoảng 0–1 được hiểu là ô định dạng phần trăm và
-> nhân 100 (0.4 → 40). Do trọng số/kết quả thực tế luôn ≥ 1 nên đánh đổi này an toàn.
-
-> ⚠️ Nếu bạn đã chạy `schema.sql` trước đây: cần **chạy lại** file (hoặc ít nhất policy
-> `eval_insert`) để quản lý được tạo phiếu cho cấp dưới khi nhập Excel hàng loạt.
+Tên nhân viên: ô NHÂN VIÊN trong file > tên sheet > tên file; sửa tay được, có gợi ý tên đã có
+trong hệ thống khi gõ gần giống. Kiểm tra trước khi nhập: tổng trọng số = 100%, số trong 0–100%,
+trùng người/kỳ, kỳ bị khoá, phiếu đã duyệt (chặn ghi đè). File gốc được lưu (`kpi_files`, ≤ 8 MB)
+để xuất lại đúng biểu mẫu.
 
 ---
 
@@ -158,9 +151,10 @@ src/
   lib/          supabase.js (client + gắn JWT), constants.js (nhóm KPI, trạng thái, kỳ)
                 excel.js (tạo/đọc template Excel + kiểm tra dữ liệu)
   context/      AuthContext.jsx (đăng nhập qua Edge Function, JWT, vai trò)
-  components/   Layout, ProtectedRoute, Spinner
-  pages/        Login, Dashboard, EvaluationList, EvaluationForm, ManagerReview,
-                ExcelImport (nhập/xuất hàng loạt), Admin
+                exportKpi.js (xuất Excel theo file gốc), people.js (danh sách người duyệt)
+  components/   Layout, ProtectedRoute, Spinner, ui (Field, badge, chọn người duyệt)
+  pages/        Login, ImportKpi (1. nhập), KpiList + EvaluationDetail (2. phiếu & duyệt),
+                TeamInsights (báo cáo), Admin
 supabase/
   schema.sql            bảng KPI + RLS + view kpi_users (dùng chung users của DA)
   functions/login/      Edge Function xác thực mật khẩu (SHA-256 giống DA) + cấp JWT

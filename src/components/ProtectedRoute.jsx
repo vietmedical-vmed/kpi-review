@@ -2,8 +2,8 @@ import { Navigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import Spinner from './Spinner'
 
-export default function ProtectedRoute({ children, requireManager, requireAdmin }) {
-  const { username, profile, loading, isManager, isAdmin } = useAuth()
+export default function ProtectedRoute({ children, requireManager, requireAdmin, requireUpload }) {
+  const { username, profile, loading, isManager, isAdmin, canUpload } = useAuth()
 
   if (loading) return <Spinner />
   if (!username) return <Navigate to="/login" replace />
@@ -13,6 +13,7 @@ export default function ProtectedRoute({ children, requireManager, requireAdmin 
 
   if (requireAdmin && !isAdmin) return <Navigate to="/" replace />
   if (requireManager && !isManager) return <Navigate to="/" replace />
+  if (requireUpload && !canUpload) return <Navigate to="/" replace />
 
   return children
 }

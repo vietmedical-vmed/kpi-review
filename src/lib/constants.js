@@ -10,26 +10,51 @@ export const CATEGORIES = [
   'Thành tích',
 ]
 
-// Trạng thái phiếu đánh giá
+// Trạng thái phiếu — luồng rút gọn 2 bước:
+//   Chờ duyệt (submitted): người nhập đã nhập, còn sửa được.
+//   Đã duyệt  (approved) : N+1/admin đã duyệt, khoá sửa (trừ N+1/admin bỏ duyệt).
+// 'draft' / 'reviewed' là trạng thái cũ, hiển thị như "Chờ duyệt".
 export const EVAL_STATUS = {
-  DRAFT: 'draft', // nhân viên đang nhập
-  SUBMITTED: 'submitted', // đã gửi, chờ quản lý duyệt
-  REVIEWED: 'reviewed', // quản lý đã chấm
-  APPROVED: 'approved', // đã chốt
+  PENDING: 'submitted',
+  APPROVED: 'approved',
 }
 
 export const STATUS_LABELS = {
-  draft: 'Nháp',
+  draft: 'Chờ duyệt',
   submitted: 'Chờ duyệt',
-  reviewed: 'Đã chấm',
-  approved: 'Đã chốt',
+  reviewed: 'Chờ duyệt',
+  approved: 'Đã duyệt',
 }
 
 export const STATUS_COLORS = {
-  draft: 'bg-slate-100 text-slate-700',
+  draft: 'bg-amber-100 text-amber-800',
   submitted: 'bg-amber-100 text-amber-800',
-  reviewed: 'bg-blue-100 text-blue-800',
+  reviewed: 'bg-amber-100 text-amber-800',
   approved: 'bg-green-100 text-green-800',
+}
+
+export const isApproved = (ev) => ev?.status === 'approved'
+
+/**
+ * Quyền trên 1 phiếu (khớp RLS kpi_can_edit_eval ở DB):
+ *  - approve: người duyệt (manager_username) hoặc admin; phiếu gắn TK cũ: QL trực tiếp
+ *  - edit   : người duyệt / admin luôn sửa được; người nhập (imported_by) và chủ
+ *             phiếu chỉ sửa khi chưa duyệt
+ *  - remove : admin, hoặc người nhập / người duyệt khi chưa duyệt
+ */
+export function evalPermissions(ev, { username, isAdmin, canUpload, directManager } = {}) {
+  if (!ev) return { approve: false, edit: false, remove: false, isApprover: false, isUploader: false }
+  const isApprover = isAdmin || (ev.username ? directManager === username : ev.manager_username === username)
+  const isUploader = !!ev.imported_by && ev.imported_by === username && canUpload
+  const isOwner = !!ev.username && ev.username === username
+  const approved = isApproved(ev)
+  return {
+    isApprover,
+    isUploader,
+    approve: isApprover,
+    edit: isApprover || (!approved && (isUploader || isOwner)),
+    remove: isAdmin || (!approved && (isUploader || (!ev.username && ev.manager_username === username))),
+  }
 }
 
 // Định dạng kỳ đánh giá dạng "YYYY-MM"
@@ -74,9 +99,9 @@ export function finalScore(ev) {
   return m === 0 ? Number(ev.self_total) || 0 : m
 }
 
-// Phiếu đã có kết quả để xếp loại chưa (đã gửi trở đi)
+// Phiếu có kết quả để xếp loại chưa (đã có KQ của N hoặc N+1)
 export function hasResult(ev) {
-  return !!ev && ev.status !== 'draft'
+  return !!ev && (Number(ev.self_total) > 0 || Number(ev.manager_total) > 0)
 }
 
 export function gradeOf(score) {

@@ -74,7 +74,7 @@ function UsersTab() {
     const next = { ...current, ...changes, username }
     const { error } = await supabase
       .from('kpi_profiles')
-      .upsert(next, { onConflict: 'username' })
+      .upsert(next, { onConflict: 'username', defaultToNull: false })
     setSavingId(null)
     if (error) {
       setMessage('Lỗi: ' + error.message)
@@ -99,8 +99,9 @@ function UsersTab() {
   return (
     <div>
       <p className="mb-3 text-sm text-slate-500">
-        Danh sách lấy từ bảng <code>users</code> dùng chung. Gán <b>quản lý trực tiếp</b> và
-        <b> quyền admin KPI</b> cho từng người (lưu vào <code>kpi_profiles</code>, không đổi bảng users).
+        Danh sách lấy từ bảng <code>users</code> dùng chung. Cấp <b>quyền nhập KPI</b> (upload file Excel), gán{' '}
+        <b>quản lý trực tiếp</b> và <b>quyền admin KPI</b> cho từng người (lưu vào <code>kpi_profiles</code>, không đổi
+        bảng users). Admin luôn có quyền nhập.
       </p>
       <div className="mb-3 flex items-center justify-between gap-3">
         <input
@@ -124,6 +125,7 @@ function UsersTab() {
               <th className="px-3 py-3 font-medium">Username</th>
               <th className="px-3 py-3 font-medium">Miền / BU</th>
               <th className="px-3 py-3 font-medium">Quản lý trực tiếp</th>
+              <th className="px-3 py-3 text-center font-medium">Quyền nhập</th>
               <th className="px-3 py-3 text-center font-medium">Admin KPI</th>
             </tr>
           </thead>
@@ -161,6 +163,16 @@ function UsersTab() {
                           </option>
                         ))}
                     </select>
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    <input
+                      type="checkbox"
+                      checked={!!p.can_upload}
+                      onChange={(e) =>
+                        saveProfile(u.username, { can_upload: e.target.checked })
+                      }
+                      className="h-4 w-4"
+                    />
                   </td>
                   <td className="px-3 py-2 text-center">
                     <input
@@ -320,7 +332,7 @@ function OrgTab() {
     ]
     const { error: upErr } = await supabase
       .from('kpi_profiles')
-      .upsert(rows, { onConflict: 'username' })
+      .upsert(rows, { onConflict: 'username', defaultToNull: false })
     setSaving(false)
 
     if (upErr) {

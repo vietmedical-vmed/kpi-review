@@ -135,25 +135,32 @@ function headerField(text) {
   return null
 }
 
-function readSheet(ws) {
-  if (!ws) return null
-  // Tìm dòng tiêu đề trong 20 dòng đầu
-  let headerRow = 0
-  const cols = {}
+// Tìm dòng tiêu đề (có STT + TÊN MỤC TIÊU) trong 20 dòng đầu
+function findHeader(ws) {
   for (let r = 1; r <= Math.min(20, ws.rowCount); r++) {
-    const row = ws.getRow(r)
     const found = {}
-    row.eachCell({ includeEmpty: false }, (cell, c) => {
+    ws.getRow(r).eachCell({ includeEmpty: false }, (cell, c) => {
       const f = headerField(cellText(cell))
       if (f && !found[f]) found[f] = c
     })
-    if (found.stt && found.name) {
-      headerRow = r
-      Object.assign(cols, found)
-      break
-    }
+    if (found.stt && found.name) return { headerRow: r, cols: found }
   }
-  if (!headerRow) return { headerFound: false, rows: [], comments: {} }
+  return null
+}
+
+// Dòng "TỔNG ..." kết thúc bảng mục tiêu (0 nếu không có)
+function findTotalRow(ws, headerRow) {
+  for (let r = headerRow + 1; r <= ws.rowCount; r++) {
+    if (normalizeName(cellText(ws.getRow(r).getCell(1))).startsWith('tong')) return r
+  }
+  return 0
+}
+
+function readSheet(ws) {
+  if (!ws) return null
+  const h = findHeader(ws)
+  if (!h) return { headerFound: false, rows: [], comments: {} }
+  const { headerRow, cols } = h
 
   const rows = []
   const comments = {}
@@ -205,7 +212,7 @@ function readSheet(ws) {
 // Đọc ô nhận diện ở các dòng đầu: "NHÂN VIÊN" | <giá trị>, "KỲ ĐÁNH GIÁ" | <giá trị>.
 // Cũng hiểu dạng 1 ô gộp "Nhân viên: X · Kỳ: Tháng 10/2026" (file tải từ bản cũ).
 function readIdentity(ws) {
-  const out = { person: '', period: null }
+  const out = { person: '', period: null, personCell: null }
   if (!ws) return out
   for (let r = 1; r <= Math.min(6, ws.rowCount); r++) {
     const row = ws.getRow(r)
@@ -232,8 +239,10 @@ function readIdentity(ws) {
         const v = cellText(vc)
         if (!v) continue
         if (PLACEHOLDER.test(v) || /^\[.*\]$/.test(v)) break
-        if (isPerson) out.person ||= v
-        else out.period ||= parsePeriodText(v)
+        if (isPerson) {
+          if (!out.person) out.personCell = vc.address
+          out.person ||= v
+        } else out.period ||= parsePeriodText(v)
         break
       }
     }
@@ -732,6 +741,170 @@ export async function buildStandardWorkbook({
   return new Blob([buffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   })
+}
+
+// ================================================================ XUẤT THEO FILE GỐC
+// Ghi số liệu mới nhất trên hệ thống vào CHÍNH file đã upload (giữ nguyên định
+// dạng, biểu mẫu, công thức, sheet phụ). Cột được nhận diện lại theo tiêu đề
+// như lúc đọc, nên file có thứ tự cột khác nhau vẫn ghi đúng chỗ.
+
+export async function fileToBase64(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  let bin = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  return btoa(bin)
+}
+
+function base64ToBytes(b64) {
+  const bin = atob(b64)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
+const TEXT_FIELDS = ['name', 'target', 'measure_method', 'reference_doc']
+const PCT_FIELDS = ['weight', 'self_result', 'manager_result']
+
+// Cột % lưu dạng tỷ lệ (0.9) hay dạng số (90)? Xét định dạng ô và giá trị hiện có.
+function columnIsFraction(ws, col, from, to) {
+  for (let r = from; r <= to; r++) {
+    const cell = ws.getRow(r).getCell(col)
+    if (String(cell.numFmt || '').includes('%')) return true
+    const v = rawValue(cell.value)
+    if (typeof v === 'number' && Math.abs(v) > 1) return false
+  }
+  return true // mặc định theo mẫu chuẩn: tỷ lệ
+}
+
+function writeCell(cell, value) {
+  if (cell.isMerged && cell.master.address !== cell.address) return
+  cell.value = value
+}
+
+// Ô giá trị của 1 nhãn ở cột A (bỏ qua phần merge của chính nhãn)
+function labelValueCell(row) {
+  for (let c = 2; c <= Math.max(row.cellCount, 4); c++) {
+    const cell = row.getCell(c)
+    if (cell.isMerged && cell.master.col === 1) continue
+    return cell.isMerged ? cell.master : cell
+  }
+  return null
+}
+
+function writeComment(ws, fromRow, labelPrefix, value) {
+  if (!value) return
+  for (let r = fromRow; r <= ws.rowCount; r++) {
+    const row = ws.getRow(r)
+    if (!normalizeName(cellText(row.getCell(1))).startsWith(labelPrefix)) continue
+    const cell = labelValueCell(row)
+    if (cell) cell.value = value
+    return
+  }
+}
+
+/**
+ * Ghi danh sách mục tiêu vào 1 sheet theo cột tiêu đề.
+ * Trả null nếu thành công, hoặc chuỗi lý do nếu không ghi được.
+ */
+function fillSheet(ws, objectives, { registrationComment, managerComment } = {}) {
+  const h = findHeader(ws)
+  if (!h) return `sheet "${ws.name}" không còn dòng tiêu đề STT / TÊN MỤC TIÊU`
+  const { headerRow, cols } = h
+  const first = headerRow + 1
+  const totalRow = findTotalRow(ws, headerRow)
+  const capacity = totalRow ? totalRow - first : Infinity
+  if (objectives.length > capacity)
+    return `sheet "${ws.name}" chỉ có ${capacity} dòng mục tiêu, phiếu có ${objectives.length}`
+
+  // Dòng dữ liệu cuối hiện có (để xoá phần thừa khi phiếu ít mục tiêu hơn)
+  const limit = totalRow ? totalRow - 1 : ws.rowCount
+  let lastData = headerRow
+  for (let r = first; r <= limit; r++) {
+    const row = ws.getRow(r)
+    if ([...TEXT_FIELDS, ...PCT_FIELDS].some((k) => cols[k] && cellText(row.getCell(cols[k])))) lastData = r
+  }
+  const fraction = {}
+  for (const k of PCT_FIELDS) if (cols[k]) fraction[k] = columnIsFraction(ws, cols[k], first, Math.max(lastData, first))
+  const hasSelf = objectives.some((o) => Number(o.self_result) > 0)
+  const hasMgr = objectives.some((o) => o.manager_result !== null && o.manager_result !== undefined)
+
+  const end = Math.max(lastData, first + objectives.length - 1)
+  for (let r = first, i = 0; r <= end; r++, i++) {
+    const row = ws.getRow(r)
+    const o = objectives[i]
+    const set = (k, v) => cols[k] && writeCell(row.getCell(cols[k]), v)
+    if (!o) {
+      for (const k of [...TEXT_FIELDS, ...PCT_FIELDS]) set(k, null)
+      if (!totalRow) set('stt', null)
+      continue
+    }
+    if (cols.stt) {
+      const c = row.getCell(cols.stt)
+      const v = rawValue(c.value)
+      if (v === null || v === undefined || v === '' || typeof v === 'number') writeCell(c, i + 1)
+    }
+    for (const k of TEXT_FIELDS) set(k, o[k] || null)
+    for (const k of PCT_FIELDS) {
+      let v = o[k]
+      if ((k === 'self_result' && !hasSelf) || (k === 'manager_result' && !hasMgr)) v = null
+      if (v === null || v === undefined || v === '') set(k, null)
+      else set(k, fraction[k] ? Math.round(Number(v) * 100) / 10000 : round2(v))
+    }
+  }
+
+  const after = totalRow || end + 1
+  writeComment(ws, after, 'y kien cua n+1', registrationComment)
+  writeComment(ws, after, 'danh gia cua n+1', managerComment)
+  return null
+}
+
+/**
+ * Điền số liệu mới nhất vào file gốc.
+ * entries: [{ key, sheet, employeeName, objectives, registrationComment, managerComment }]
+ *   sheet rỗng = file mẫu chuẩn (2 sheet Đăng ký / Đánh giá), ngược lại = tên sheet trong file cả đội.
+ * Trả { blob, failed: [{ key, reason }] } — entry failed cần xuất bằng mẫu chuẩn thay thế.
+ */
+export async function fillOriginalWorkbook(base64, entries) {
+  const ExcelJS = await loadExcelJS()
+  const wb = new ExcelJS.Workbook()
+  await wb.xlsx.load(base64ToBytes(base64))
+  const failed = []
+  for (const e of entries) {
+    const reasons = []
+    if (!e.sheet) {
+      const regWs = findSheet(wb, SHEET_REG)
+      const evWs = findSheet(wb, SHEET_EVAL)
+      if (!regWs && !evWs) reasons.push('file không còn sheet mẫu chuẩn')
+      if (regWs) {
+        const why = fillSheet(regWs, e.objectives, { registrationComment: e.registrationComment })
+        if (why) reasons.push(why)
+        const id = readIdentity(regWs)
+        if (id.personCell && e.employeeName) regWs.getCell(id.personCell).value = e.employeeName
+      }
+      if (evWs) {
+        const why = fillSheet(evWs, e.objectives, { managerComment: e.managerComment })
+        if (why) reasons.push(why)
+      }
+    } else {
+      const ws = wb.worksheets.find((w) => w.name.trim() === e.sheet.trim())
+      if (!ws) reasons.push(`không thấy sheet "${e.sheet}"`)
+      else {
+        const why = fillSheet(ws, e.objectives, {
+          registrationComment: e.registrationComment,
+          managerComment: e.managerComment,
+        })
+        if (why) reasons.push(why)
+      }
+    }
+    if (reasons.length) failed.push({ key: e.key, reason: reasons.join('; ') })
+  }
+  // Công thức (hệ số, tổng, KQ cuối cùng, sheet tổng hợp) tự tính lại khi mở file
+  wb.calcProperties = { ...(wb.calcProperties || {}), fullCalcOnLoad: true }
+  const buffer = await wb.xlsx.writeBuffer()
+  return {
+    blob: new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+    failed,
+  }
 }
 
 // ================================================================ XUẤT TỔNG HỢP ĐỘI
