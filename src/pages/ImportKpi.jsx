@@ -27,6 +27,39 @@ let seq = 0
 // Người duyệt thực tế của 1 dòng: không chọn thì là người duyệt mặc định
 const approverOf = (it) => it.approver || DEFAULT_APPROVER
 
+// Khoá họ tên của 1 phiếu. Phiếu cũ gắn tài khoản (nhập trước khi bỏ gắn TK) chưa có
+// employee_key -> chuẩn hoá từ employee_name, để nhập lại vẫn khớp đúng phiếu cũ.
+const rowKey = (e) => e.employee_key || normalizeName(e.employee_name)
+
+// Phiếu sẽ được cập nhật khi nhập lại: ưu tiên phiếu không TK cùng người duyệt,
+// rồi phiếu không TK bất kỳ, cuối cùng phiếu cũ gắn tài khoản.
+function pickExisting(list, key, approverUn) {
+  const c = (list || []).filter((e) => rowKey(e) === key)
+  return (
+    c.find((e) => !e.username && e.manager_username === approverUn) ||
+    c.find((e) => !e.username) ||
+    c[0] ||
+    null
+  )
+}
+
+// Mọi phiếu của 1 kỳ có thể trùng các tên đã cho (không TK theo employee_key + phiếu cũ gắn TK)
+async function findCandidates(period, keys, columns = '*') {
+  const [a, b] = await Promise.all([
+    supabase.from('evaluations').select(columns).eq('period', period).is('username', null).in('employee_key', keys),
+    supabase
+      .from('evaluations')
+      .select(columns)
+      .eq('period', period)
+      .not('username', 'is', null)
+      .not('employee_name', 'is', null),
+  ])
+  if (a.error) throw a.error
+  if (b.error) throw b.error
+  const set = new Set(keys)
+  return [...(a.data || []), ...(b.data || []).filter((e) => set.has(rowKey(e)))]
+}
+
 // Tên nhân viên lấy từ file: ô NHÂN VIÊN > tên sheet > phần đầu tên file
 function nameFromFile(parsed) {
   const cell = (parsed.identity?.person || '').replace(/\s*\([^()]*\)\s*$/, '').trim()
@@ -61,10 +94,13 @@ export default function ImportKpi() {
     const { data } = await supabase
       .from('evaluations')
       .select('employee_key, employee_name, period')
-      .is('username', null)
+      .not('employee_name', 'is', null)
       .order('period', { ascending: false })
     const m = new Map()
-    for (const e of data || []) if (e.employee_key && !m.has(e.employee_key)) m.set(e.employee_key, { name: e.employee_name, period: e.period })
+    for (const e of data || []) {
+      const k = rowKey(e)
+      if (k && !m.has(k)) m.set(k, { name: e.employee_name, period: e.period })
+    }
     return m
   }
 
@@ -132,13 +168,12 @@ export default function ImportKpi() {
       const byPeriod = {}
       for (const it of list) (byPeriod[it.period] ||= new Set()).add(normalizeName(it.employeeName))
       for (const [p, keys] of Object.entries(byPeriod)) {
-        const { data } = await supabase
-          .from('evaluations')
-          .select('id, employee_key, employee_name, manager_username, imported_by, username, period, status')
-          .eq('period', p)
-          .is('username', null)
-          .in('employee_key', [...keys])
-        for (const ev of data || []) (next[`${ev.employee_key}|${p}`] ||= []).push(ev)
+        const data = await findCandidates(
+          p,
+          [...keys],
+          'id, employee_key, employee_name, manager_username, imported_by, username, period, status'
+        )
+        for (const ev of data) (next[`${rowKey(ev)}|${p}`] ||= []).push(ev)
       }
       if (!cancelled) setExisting(next)
     })()
@@ -149,8 +184,8 @@ export default function ImportKpi() {
 
   // Phiếu hiện có sẽ bị cập nhật: ưu tiên phiếu cùng người duyệt
   function existingOf(it, map = existing) {
-    const list = map[`${normalizeName(it.employeeName)}|${it.period}`] || []
-    return list.find((e) => e.manager_username === approverOf(it)) || list[0] || null
+    const key = normalizeName(it.employeeName)
+    return pickExisting(map[`${key}|${it.period}`], key, approverOf(it))
   }
 
   function updateItem(id, changes) {
@@ -221,15 +256,8 @@ export default function ImportKpi() {
     const p = it.parsed
     const name = it.employeeName.trim()
     const key = normalizeName(name)
-    const { data: found, error: findErr } = await supabase
-      .from('evaluations')
-      .select('*')
-      .eq('period', it.period)
-      .is('username', null)
-      .eq('employee_key', key)
-    if (findErr) throw findErr
     const approverUn = approverOf(it)
-    let ev = (found || []).find((e) => e.manager_username === approverUn) || found?.[0] || null
+    let ev = pickExisting(await findCandidates(it.period, [key]), key, approverUn)
     if (ev && isApproved(ev)) throw new Error('phiếu đã được duyệt')
 
     const fileId = await storeFile(it.fileKey, fileCache)
@@ -274,6 +302,7 @@ export default function ImportKpi() {
     const { error: upErr } = await supabase
       .from('evaluations')
       .update({
+        username: null, // phiếu cũ gắn tài khoản chuyển sang luồng không gắn TK
         employee_name: name,
         employee_key: key,
         manager_username: approverUn,
@@ -574,7 +603,7 @@ function PreviewRows({ it, errs, ev, check, open, periods, people, me, onToggle,
               <StatusBadge status={ev.status} />
               <div className="mt-0.5 text-[11px] text-slate-500">
                 {isApproved(ev) ? 'Đã khoá' : 'Sẽ cập nhật'}
-                {ev.manager_username !== approverOf(it) ? ` · đang ở ${userLabel(people.userMap, ev.manager_username)}` : ''}
+                {ev.manager_username && ev.manager_username !== approverOf(it) ?` · đang ở ${userLabel(people.userMap, ev.manager_username)}` : ''}
               </div>
             </div>
           ) : (
