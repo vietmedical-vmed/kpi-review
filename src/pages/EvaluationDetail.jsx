@@ -1,7 +1,7 @@
 // CHI TIẾT PHIẾU — xem, điều chỉnh, duyệt, xuất Excel.
 //  • Người nhập: sửa mọi thông tin khi phiếu còn "Chờ duyệt".
 //  • Người duyệt (N+1) / admin: điều chỉnh rồi "Duyệt"; "Bỏ duyệt" để mở lại.
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../context/AuthContext'
@@ -311,15 +311,15 @@ export default function EvaluationDetail() {
       )}
 
       <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
-        <table className="w-full min-w-[1100px] text-sm">
+        <table className="w-full min-w-[1280px] text-sm">
           <thead className="bg-slate-50 text-left align-bottom text-slate-600">
             <tr>
               <th className="px-2 py-2 font-medium">STT</th>
-              <th className="px-2 py-2 font-medium">Tên mục tiêu</th>
-              <th className="px-2 py-2 font-medium">Mục tiêu cần đạt</th>
-              <th className="px-2 py-2 font-medium">Cách thức đo</th>
+              <th className="min-w-[11rem] px-2 py-2 font-medium">Tên mục tiêu</th>
+              <th className="min-w-[17rem] px-2 py-2 font-medium">Mục tiêu cần đạt</th>
+              <th className="min-w-[17rem] px-2 py-2 font-medium">Cách thức đo</th>
               <th className="px-2 py-2 text-right font-medium">Trọng số %</th>
-              <th className="px-2 py-2 font-medium">Tài liệu tham chiếu</th>
+              <th className="min-w-[11rem] px-2 py-2 font-medium">Tài liệu tham chiếu</th>
               <th className="px-2 py-2 text-right font-medium">KQ của N %</th>
               <th className="px-2 py-2 text-right font-medium">Hệ số N</th>
               <th className="px-2 py-2 text-right font-medium text-blue-700">KQ của N+1 %</th>
@@ -332,7 +332,7 @@ export default function EvaluationDetail() {
               <tr key={r.id} className="align-top">
                 <td className="px-2 py-2 text-slate-500">{i + 1}</td>
                 <td className="px-2 py-2">
-                  <Cell area={false} value={r.name} edit={canEdit} onChange={(v) => updateRow(r.id, 'name', v)} w="w-36" />
+                  <Cell value={r.name} edit={canEdit} onChange={(v) => updateRow(r.id, 'name', v)} />
                 </td>
                 <td className="px-2 py-2">
                   <Cell value={r.target} edit={canEdit} onChange={(v) => updateRow(r.id, 'target', v)} />
@@ -344,7 +344,7 @@ export default function EvaluationDetail() {
                   <NumCell value={r.weight} edit={canEdit} onChange={(v) => updateRow(r.id, 'weight', v)} />
                 </td>
                 <td className="px-2 py-2">
-                  <Cell area={false} value={r.reference_doc} edit={canEdit} onChange={(v) => updateRow(r.id, 'reference_doc', v)} w="w-28" />
+                  <Cell value={r.reference_doc} edit={canEdit} onChange={(v) => updateRow(r.id, 'reference_doc', v)} />
                 </td>
                 <td className="px-2 py-2 text-right">
                   <NumCell value={r.self_result} edit={canEdit} onChange={(v) => updateRow(r.id, 'self_result', v)} />
@@ -479,12 +479,34 @@ function Comment({ label, value, edit, onChange }) {
   )
 }
 
-function Cell({ value, edit, onChange, area = true, w = 'w-44' }) {
-  if (!edit) return <span className="whitespace-pre-wrap text-slate-700">{value || '—'}</span>
-  return area ? (
-    <textarea value={value || ''} onChange={(e) => onChange(e.target.value)} rows={2} className={`${w} rounded border border-slate-300 px-1.5 py-1 text-xs`} />
-  ) : (
-    <input value={value || ''} onChange={(e) => onChange(e.target.value)} className={`${w} rounded border border-slate-300 px-1.5 py-1 text-xs`} />
+// Ô chữ hiển thị HẾT nội dung: chỉ đọc -> xuống dòng đầy đủ; sửa được -> textarea tự
+// giãn chiều cao theo nội dung (không bị cắt, không cần cuộn trong ô).
+function Cell({ value, edit, onChange }) {
+  if (!edit) return <div className="whitespace-pre-wrap break-words text-slate-700">{value || '—'}</div>
+  return <AutoTextarea value={value || ''} onChange={onChange} />
+}
+
+function AutoTextarea({ value, onChange }) {
+  const ref = useRef(null)
+  const fit = () => {
+    const el = ref.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight + 2}px`
+  }
+  useLayoutEffect(fit, [value])
+  useEffect(() => {
+    window.addEventListener('resize', fit)
+    return () => window.removeEventListener('resize', fit)
+  }, [])
+  return (
+    <textarea
+      ref={ref}
+      value={value}
+      rows={1}
+      onChange={(e) => onChange(e.target.value)}
+      className="block w-full resize-none overflow-hidden rounded border border-slate-300 px-1.5 py-1 text-xs leading-5"
+    />
   )
 }
 
